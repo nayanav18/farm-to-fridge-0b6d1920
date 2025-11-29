@@ -5,10 +5,12 @@ import { Input } from "@/components/ui/input";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { AlertTriangle, TrendingUp, Send } from "lucide-react";
+import { AlertTriangle, TrendingUp, Send, BarChart3 } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { useQuery } from "@tanstack/react-query";
 import PredictionChart from "@/components/PredictionChart";
+import HistoricalSalesChart from "@/components/HistoricalSalesChart";
+import DemandAnalysis from "@/components/DemandAnalysis";
 
 const SupermarketDashboard = () => {
   const { toast } = useToast();
@@ -163,8 +165,23 @@ const SupermarketDashboard = () => {
   }).slice(0, 5);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <div className="lg:col-span-2 space-y-6">
+    <div className="space-y-6">
+      <Card className="border-secondary/20">
+        <CardHeader className="bg-secondary/5">
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="h-5 w-5 text-secondary" />
+            Historical Sales Overview
+          </CardTitle>
+          <CardDescription>Sales trends across all branches</CardDescription>
+        </CardHeader>
+        <CardContent className="pt-6">
+          <HistoricalSalesChart />
+        </CardContent>
+      </Card>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-6">
+          <DemandAnalysis />
         <Card className="border-secondary/20">
           <CardHeader className="bg-secondary/5">
             <CardTitle>Producer Stock Available</CardTitle>
@@ -236,9 +253,9 @@ const SupermarketDashboard = () => {
             </div>
           </CardContent>
         </Card>
-      </div>
+        </div>
 
-      <div className="space-y-6">
+        <div className="space-y-6">
         <Card className="border-danger/20">
           <CardHeader className="bg-danger/5">
             <CardTitle className="flex items-center gap-2 text-danger">
@@ -277,6 +294,7 @@ const SupermarketDashboard = () => {
             </div>
           </CardContent>
         </Card>
+        </div>
       </div>
     </div>
   );
