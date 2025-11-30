@@ -1,5 +1,5 @@
 // src/components/ProducerDashboard.tsx
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -11,199 +11,318 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import { Label } from "@/components/ui/label";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
-import { Upload, Package } from "lucide-react";
+import { Loader2, Upload } from "lucide-react";
 
-/* Small helpers and options */
-const CATEGORY_OPTIONS = ["Vegetables", "Fruits", "Dairy", "Grains", "Meat", "Beverages", "Packaged", "Other"];
-const STORAGE_TEMPS = ["Frozen", "Chilled", "Ambient"];
+/**
+ * ProducerDashboard
+ *
+ * Option 2 behavior:
+ *  - Producer uploads stock (stored in producer_stock)
+ *  - Producer selects a supermarket (destination) on upload
+ *  - Upload also creates a corresponding supermarket_stock row
+ *
+ * Notes:
+ *  - We compute shelf_life_days automatically
+ *  - We generate simple product_id and lot_id values (replace with your own logic if needed)
+ *  - Supabase typed Insert shapes can be strict; to avoid dev friction we cast insert payloads to `any` when calling supabase.insert([...]) — this is safe and straightforward
+ */
 
-const DEFAULT_FORM = {
-  product_name: "",
-  category: CATEGORY_OPTIONS[0],
-  quantity: "",
-  price_per_unit: "",
-  shelf_life_days: "",
-  manufacturing_date: "",
-  expiry_date: "",
-  storage_temperature: STORAGE_TEMPS[2],
-  company_name: "",
-  is_perishable: false,
+const CATEGORIES = [
+  "Vegetables",
+  "Fruits",
+  "Dairy",
+  "Bakery",
+  "Meat",
+  "Grains",
+  "Other",
+];
+
+const STORAGE_OPTIONS = [
+  "Ambient",
+  "Refrigerated",
+  "Frozen",
+];
+
+const SUPERMARKETS = [
+  "Supermarket A",
+  "Supermarket B",
+  "Supermarket C",
+];
+
+type ProducerRow = {
+  id: string;
+  date: string;
+  product_id: number;
+  product_name: string;
+  category: string;
+  company_name: string;
+  is_perishable: boolean;
+  shelf_life_days: number;
+  storage_temperature: string;
+  lot_id: string;
+  stock_batch_quantity: number;
+  quantity_stocked: number;
+  manufacturing_date: string;
+  expiry_date: string;
+  price_per_unit: number;
+  created_at?: string | null;
 };
 
-const genRandomProductId = () => Math.floor(100000 + Math.random() * 900000); // 6-digit
-const genLotId = () => `LOT-${Math.random().toString(36).slice(2, 9).toUpperCase()}`;
-
-const ProducerDashboard: React.FC = () => {
+export default function ProducerDashboard() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [form, setForm] = useState(DEFAULT_FORM);
-  const [submitting, setSubmitting] = useState(false);
 
-  const { data: producerStock = [], isLoading } = useQuery({
+  // Form state
+  const [form, setForm] = useState({
+    product_name: "",
+    category: CATEGORIES[0],
+    storage_temperature: STORAGE_OPTIONS[0],
+    quantity: "",
+    price_per_unit: "",
+    manufacturing_date: "",
+    expiry_date: "",
+    company_name: "",
+    target_supermarket: SUPERMARKETS[0],
+  });
+
+  const updateField = (k: keyof typeof form, v: string) =>
+    setForm((p) => ({ ...p, [k]: v }));
+
+  // derive shelf life days
+  const shelfLifeDays = useMemo(() => {
+    if (!form.manufacturing_date || !form.expiry_date) return 0;
+    const m = new Date(form.manufacturing_date);
+    const e = new Date(form.expiry_date);
+    const diff = Math.ceil((e.getTime() - m.getTime()) / (1000 * 60 * 60 * 24));
+    return diff > 0 ? diff : 0;
+  }, [form.manufacturing_date, form.expiry_date]);
+
+  // fetch producer_stock for history view
+  const { data: producerStock = [], isRefetching: producerRefetching } = useQuery({
     queryKey: ["producer-stock"],
     queryFn: async () => {
-      const res = await supabase.from("producer_stock").select("*").order("created_at", { ascending: false });
+      const res = await supabase
+        .from("producer_stock")
+        .select("*")
+        .order("created_at", { ascending: false });
       if ((res as any)?.error) throw (res as any).error;
-      return ((res as any)?.data ?? []) as any[];
+      return ((res as any)?.data ?? []) as ProducerRow[];
     },
   });
 
+  // mutation: insert into producer_stock and supermarket_stock
   const uploadMutation = useMutation({
-    mutationFn: async (payload: any) => {
-      // Cast to any to avoid strict Postgrest overload errors in TS
-      const res = await (supabase as any).from("producer_stock").insert([payload]);
-      if (res?.error) throw res.error;
-      return res;
+    mutationFn: async (payload: typeof form) => {
+      // parse numeric fields
+      const qty = Number(payload.quantity) || 0;
+      const price = Number(payload.price_per_unit) || 0;
+
+      // generate a product_id and lot_id (replace with your own supplier-id logic if available)
+      // product_id as timestamp-based integer (fine for demo)
+      const product_id = Math.floor(Date.now() / 1000) % 1000000;
+      const lot_id = `LOT-${Date.now().toString(36).slice(-6)}`;
+
+      // producer_stock payload (match required DB insert fields)
+      const producerPayload = {
+        product_id,
+        product_name: payload.product_name,
+        category: payload.category,
+        company_name: payload.company_name,
+        is_perishable: shelfLifeDays > 7,
+        shelf_life_days: shelfLifeDays,
+        storage_temperature: payload.storage_temperature,
+        lot_id,
+        stock_batch_quantity: qty,
+        quantity_stocked: qty,
+        manufacturing_date: payload.manufacturing_date,
+        expiry_date: payload.expiry_date,
+        price_per_unit: price,
+        date: new Date().toISOString().slice(0, 10),
+      };
+
+      // supermarket_stock payload (send immediately to selected supermarket)
+      const supermarketPayload = {
+        product_id,
+        product_name: payload.product_name,
+        category: payload.category,
+        company_name: payload.target_supermarket,
+        is_perishable: shelfLifeDays > 7,
+        shelf_life_days: shelfLifeDays,
+        storage_temperature: payload.storage_temperature,
+        lot_id,
+        quantity: qty,
+        manufacturing_date: payload.manufacturing_date,
+        expiry_date: payload.expiry_date,
+        price_per_unit: price,
+        source_producer: payload.company_name,
+        transfer_date: new Date().toISOString(),
+        date: new Date().toISOString().slice(0, 10),
+      };
+
+      // Perform both inserts inside try/catch so we can rollback or notify on failure
+      // Use `as any` to avoid strict type mismatches with generated types
+      const pInsert = await supabase.from("producer_stock").insert([producerPayload] as any);
+      if ((pInsert as any)?.error) throw (pInsert as any).error;
+
+      const sInsert = await supabase.from("supermarket_stock").insert([supermarketPayload] as any);
+      if ((sInsert as any)?.error) {
+        // attempt to delete created producer row to keep consistency
+        const createdId = ((pInsert as any)?.data ?? [])[0]?.id;
+        if (createdId) {
+          await supabase.from("producer_stock").delete().eq("id", createdId);
+        }
+        throw (sInsert as any).error;
+      }
+
+      return { producerRes: pInsert, supermarketRes: sInsert };
     },
+
     onSuccess: () => {
-      toast({ title: "Stock uploaded", description: "Producer stock added." });
       queryClient.invalidateQueries({ queryKey: ["producer-stock"] });
-      setForm(DEFAULT_FORM);
+      queryClient.invalidateQueries({ queryKey: ["supermarket-stock"] });
+      toast({
+        title: "Stock uploaded & dispatched",
+        description: `Product sent to ${form.target_supermarket}`,
+      });
+
+      // reset form
+      setForm({
+        product_name: "",
+        category: CATEGORIES[0],
+        storage_temperature: STORAGE_OPTIONS[0],
+        quantity: "",
+        price_per_unit: "",
+        manufacturing_date: "",
+        expiry_date: "",
+        company_name: "",
+        target_supermarket: SUPERMARKETS[0],
+      });
     },
+
     onError: (err: any) => {
-      toast({ title: "Upload failed", description: err?.message ?? "Unknown", variant: "destructive" });
+      toast({
+        title: "Upload failed",
+        description: err?.message ?? "Unknown error",
+        variant: "destructive",
+      });
     },
   });
 
-  const handleChange = (key: keyof typeof DEFAULT_FORM, value: string | boolean) => {
-    setForm((s) => ({ ...s, [key]: value }));
-  };
-
-  const handleSubmit: React.FormEventHandler = async (e) => {
-    e.preventDefault();
-
-    if (!form.product_name.trim()) {
-      toast({ title: "Validation", description: "Product name required", variant: "destructive" });
+  const handleSubmit = (e?: React.FormEvent) => {
+    e?.preventDefault();
+    // basic validation
+    if (!form.product_name || !form.company_name || !form.quantity || !form.price_per_unit || !form.manufacturing_date || !form.expiry_date) {
+      toast({ title: "Missing fields", description: "Please fill required fields", variant: "destructive" });
       return;
     }
-    const qty = Number(form.quantity);
-    const price = Number(form.price_per_unit);
-    if (!qty || qty <= 0) {
-      toast({ title: "Validation", description: "Invalid quantity", variant: "destructive" });
+    if (shelfLifeDays <= 0) {
+      toast({ title: "Invalid dates", description: "Expiry must be after manufacturing", variant: "destructive" });
       return;
     }
-    if (!price || isNaN(price)) {
-      toast({ title: "Validation", description: "Invalid price", variant: "destructive" });
-      return;
-    }
-
-    setSubmitting(true);
-
-    const payload = {
-      // auto-generate required DB fields
-      product_id: genRandomProductId(),
-      product_name: form.product_name.trim(),
-      category: form.category,
-      company_name: form.company_name.trim() || "Producer",
-      is_perishable: !!form.is_perishable,
-      shelf_life_days: Number(form.shelf_life_days) || 0,
-      storage_temperature: form.storage_temperature,
-      lot_id: genLotId(),
-      stock_batch_quantity: qty,
-      quantity_stocked: qty,
-      manufacturing_date: form.manufacturing_date || new Date().toISOString().slice(0, 10),
-      expiry_date: form.expiry_date || new Date(Date.now() + (Number(form.shelf_life_days || 0) * 24 * 60 * 60 * 1000)).toISOString().slice(0,10),
-      price_per_unit: price,
-      date: new Date().toISOString().slice(0, 10),
-    };
-
-    try {
-      await uploadMutation.mutateAsync(payload);
-    } finally {
-      setSubmitting(false);
-    }
+    uploadMutation.mutate(form);
   };
 
   return (
     <div className="space-y-6">
-      <Card className="shadow-sm">
-        <CardHeader className="bg-primary text-primary-foreground rounded-t-md p-6">
-          <div className="flex items-center gap-3">
-            <Upload className="h-6 w-6" />
-            <div>
-              <CardTitle className="text-lg text-primary-foreground">Upload Stock</CardTitle>
-              <CardDescription className="text-primary-foreground/90">Auto-generated product & lot IDs — improved green UI</CardDescription>
-            </div>
-          </div>
+      <Card className="border-success/20">
+        <CardHeader className="bg-success/5">
+          <CardTitle className="flex items-center gap-2 text-success">
+            <Upload className="h-5 w-5" />
+            Upload & Dispatch Stock
+          </CardTitle>
+          <CardDescription>Send inventory to a supermarket and store a record in producer stock</CardDescription>
         </CardHeader>
 
-        <CardContent className="bg-primary/5 p-6 rounded-b-md">
-          <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <CardContent>
+          <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
               <Label>Product Name</Label>
-              <Input value={form.product_name} onChange={(e) => handleChange("product_name", e.target.value)} placeholder="e.g. Tomatoes" />
+              <Input value={form.product_name} onChange={(e) => updateField("product_name", e.target.value)} required />
             </div>
 
             <div>
               <Label>Category</Label>
-              <Select value={form.category} onValueChange={(v) => handleChange("category", v)}>
+              <Select value={form.category} onValueChange={(v) => updateField("category", v)}>
                 <SelectTrigger>
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {CATEGORY_OPTIONS.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                  {CATEGORIES.map((c) => <SelectItem key={c} value={c}>{c}</SelectItem>)}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div>
+              <Label>Storage Temperature</Label>
+              <Select value={form.storage_temperature} onValueChange={(v) => updateField("storage_temperature", v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {STORAGE_OPTIONS.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
 
             <div>
               <Label>Quantity</Label>
-              <Input type="number" value={form.quantity} onChange={(e) => handleChange("quantity", e.target.value)} placeholder="Units" />
+              <Input type="number" min={1} value={form.quantity} onChange={(e) => updateField("quantity", e.target.value)} required />
             </div>
 
             <div>
-              <Label>Price per Unit (₹)</Label>
-              <Input type="number" step="0.01" value={form.price_per_unit} onChange={(e) => handleChange("price_per_unit", e.target.value)} placeholder="e.g. 2.50" />
-            </div>
-
-            <div>
-              <Label>Shelf Life (days)</Label>
-              <Input type="number" value={form.shelf_life_days} onChange={(e) => handleChange("shelf_life_days", e.target.value)} />
+              <Label>Price per unit</Label>
+              <Input type="number" step="0.01" value={form.price_per_unit} onChange={(e) => updateField("price_per_unit", e.target.value)} required />
             </div>
 
             <div>
               <Label>Manufacturing Date</Label>
-              <Input type="date" value={form.manufacturing_date} onChange={(e) => handleChange("manufacturing_date", e.target.value)} />
+              <Input type="date" value={form.manufacturing_date} onChange={(e) => updateField("manufacturing_date", e.target.value)} required />
             </div>
 
             <div>
               <Label>Expiry Date</Label>
-              <Input type="date" value={form.expiry_date} onChange={(e) => handleChange("expiry_date", e.target.value)} />
-            </div>
-
-            <div>
-              <Label>Storage Temperature</Label>
-              <Select value={form.storage_temperature} onValueChange={(v) => handleChange("storage_temperature", v)}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STORAGE_TEMPS.map((t) => <SelectItem key={t} value={t}>{t}</SelectItem>)}
-                </SelectContent>
-              </Select>
+              <Input type="date" value={form.expiry_date} onChange={(e) => updateField("expiry_date", e.target.value)} required />
             </div>
 
             <div>
               <Label>Company Name</Label>
-              <Input value={form.company_name} onChange={(e) => handleChange("company_name", e.target.value)} placeholder="Producer / Farm" />
+              <Input value={form.company_name} onChange={(e) => updateField("company_name", e.target.value)} required />
             </div>
 
-            <div className="md:col-span-2 flex items-center gap-4">
-              <label className="inline-flex items-center gap-2">
-                <input type="checkbox" checked={form.is_perishable} onChange={(e) => handleChange("is_perishable", e.target.checked)} />
-                <span>Is perishable?</span>
-              </label>
+            <div>
+              <Label>Send to Supermarket</Label>
+              <Select value={form.target_supermarket} onValueChange={(v) => updateField("target_supermarket", v)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {SUPERMARKETS.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                </SelectContent>
+              </Select>
             </div>
 
-            <div className="md:col-span-2">
-              <Button type="submit" className="w-full bg-primary hover:bg-primary/90 text-primary-foreground" disabled={submitting}>
-                {submitting ? "Uploading..." : "Upload Stock"}
-              </Button>
+            <div className="col-span-1 md:col-span-2">
+              <div className="flex items-center justify-between">
+                <div className="text-sm text-muted-foreground">
+                  Auto shelf life: <strong>{shelfLifeDays} days</strong>
+                </div>
+                <div className="text-sm text-muted-foreground">Select supermarket to dispatch immediately</div>
+              </div>
+
+              <div className="mt-3">
+                <Button type="submit" className="w-full" disabled={uploadMutation.isPending}>
+                  {uploadMutation.isPending ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Uploading...</>
+                  ) : (
+                    "Upload & Send"
+                  )}
+                </Button>
+              </div>
             </div>
           </form>
         </CardContent>
@@ -211,42 +330,39 @@ const ProducerDashboard: React.FC = () => {
 
       <Card>
         <CardHeader>
-          <div className="flex items-center gap-3">
-            <Package className="h-5 w-5" />
-            <div>
-              <CardTitle>Stock History</CardTitle>
-              <CardDescription>Recently uploaded producer batches</CardDescription>
-            </div>
-          </div>
+          <CardTitle>Producer Stock History</CardTitle>
+          <CardDescription>Recent uploads from this producer interface</CardDescription>
         </CardHeader>
 
         <CardContent>
-          {isLoading ? (
-            <div className="py-8 text-center">Loading...</div>
+          {producerRefetching && producerStock.length === 0 ? (
+            <div className="flex justify-center py-8">
+              <Loader2 className="h-8 w-8 animate-spin text-success" />
+            </div>
           ) : producerStock.length === 0 ? (
-            <div className="py-8 text-center text-muted-foreground">No stock uploaded yet</div>
+            <p className="text-center text-muted-foreground py-8">No stock uploaded yet</p>
           ) : (
             <div className="overflow-x-auto">
               <Table>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Product</TableHead>
+                    <TableHead>Category</TableHead>
                     <TableHead>Qty</TableHead>
                     <TableHead>Price</TableHead>
                     <TableHead>Expiry</TableHead>
                     <TableHead>Company</TableHead>
-                    <TableHead>Storage</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {producerStock.map((row: any) => (
-                    <TableRow key={row.id}>
-                      <TableCell className="font-medium">{row.product_name}</TableCell>
-                      <TableCell>{row.quantity_stocked ?? row.stock_batch_quantity ?? "-"}</TableCell>
-                      <TableCell>₹{Number(row.price_per_unit ?? 0).toFixed(2)}</TableCell>
-                      <TableCell>{row.expiry_date ? new Date(row.expiry_date).toLocaleDateString() : "N/A"}</TableCell>
-                      <TableCell>{row.company_name}</TableCell>
-                      <TableCell>{row.storage_temperature}</TableCell>
+                  {producerStock.map((r) => (
+                    <TableRow key={r.id}>
+                      <TableCell className="font-medium">{r.product_name}</TableCell>
+                      <TableCell>{r.category}</TableCell>
+                      <TableCell>{r.quantity_stocked}</TableCell>
+                      <TableCell>₹{Number(r.price_per_unit).toFixed(2)}</TableCell>
+                      <TableCell>{new Date(r.expiry_date).toLocaleDateString()}</TableCell>
+                      <TableCell>{r.company_name}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -257,6 +373,4 @@ const ProducerDashboard: React.FC = () => {
       </Card>
     </div>
   );
-};
-
-export default ProducerDashboard;
+}
