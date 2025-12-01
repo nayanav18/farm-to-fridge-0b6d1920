@@ -1,8 +1,8 @@
-// src/components/SupermarketDashboard.tsx
 import React, { useMemo, useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
+import Papa from "papaparse";
 
 import {
   Card,
@@ -13,307 +13,375 @@ import {
 } from "@/components/ui/card";
 
 import { Button } from "@/components/ui/button";
-import { AlertTriangle, Send, Check, X } from "lucide-react";
+import { Send, Check, X } from "lucide-react";
 
 import PredictionChart from "@/components/PredictionChart";
-import DemandAnalysis from "@/components/DemandAnalysis";
 import UniversalPool from "@/components/UniversalPool";
 
 const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
 const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 
+// MAP SUPERMARKET TO CSV FILE
+const getCSVForMarket = (market: string) => {
+  if (market.includes("A")) return "/data/supermarket_A.csv";
+  if (market.includes("B")) return "/data/supermarket_B.csv";
+  if (market.includes("C")) return "/data/supermarket_C.csv";
+  return "/data/supermarket_A.csv";
+};
+
 export const SupermarketDashboard: React.FC = () => {
   const { toast } = useToast();
   const qc = useQueryClient();
 
-  const [selectedSupermarket, setSelectedSupermarket] = useState<string>(SUPERMARKETS[0]);
-  const [selectedProduct, setSelectedProduct] = useState<string>("");
+  const [selectedSupermarket, setSelectedSupermarket] = useState(SUPERMARKETS[0]);
+  const [selectedProduct, setSelectedProduct] = useState("");
 
-  // We'll keep a local mirror of incoming so we can remove processed items instantly
+  // ------------------------------------------------------------
+  // CSV LOADING FOR ANALYTICS
+  // ------------------------------------------------------------
+  const [csvData, setCsvData] = useState<any[]>([]);
+
+  useEffect(() => {
+    const file = getCSVForMarket(selectedSupermarket);
+
+    const load = async () => {
+      const res = await fetch(file);
+      const text = await res.text();
+
+      Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results) => {
+          setCsvData(results.data);
+        },
+      });
+    };
+
+    load();
+  }, [selectedSupermarket]);
+
+  // ------------------------------------------------------------
+  // TRENDING PRODUCTS (TOP 10)
+  // ------------------------------------------------------------
+  const trending = useMemo(() => {
+    if (!csvData.length) return [];
+
+    const grouped = Object.values(
+      csvData.reduce((acc: any, row: any) => {
+        const name = row.Product_Name;
+        const sold = Number(row.Quantity_Sold || 0);
+
+        if (!acc[name]) acc[name] = { product_name: name, total: 0 };
+        acc[name].total += sold;
+
+        return acc;
+      }, {})
+    ).sort((a: any, b: any) => b.total - a.total);
+
+    return grouped.slice(0, 10);
+  }, [csvData]);
+
+  // ------------------------------------------------------------
+  // CURRENTLY IN DEMAND (LAST 14 DAYS)
+  // ------------------------------------------------------------
+  const recentDemand = useMemo(() => {
+    if (!csvData.length) return [];
+
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - 14);
+
+    const filtered = csvData.filter((row) => {
+      const date = new Date(row.Date);
+      return date >= cutoff;
+    });
+
+    const grouped = Object.values(
+      filtered.reduce((acc: any, row: any) => {
+        const name = row.Product_Name;
+        const sold = Number(row.Quantity_Sold || 0);
+
+        if (!acc[name]) acc[name] = { product_name: name, total: 0 };
+        acc[name].total += sold;
+
+        return acc;
+      }, {})
+    ).sort((a: any, b: any) => b.total - a.total);
+
+    return grouped.slice(0, 10);
+  }, [csvData]);
+
+  // ------------------------------------------------------------
+  // SUPABASE LOGIC FOR INVENTORY / INCOMING
+  // ------------------------------------------------------------
+
+  // Incoming = transfer_date exists AND date is null
   const { data: incomingData } = useQuery({
-    queryKey: ["supermarket-incoming", selectedSupermarket],
+    queryKey: ["incoming", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
-        // we don't know whether accepted_at exists on your schema; if it does use it
-        .is("accepted_at", null)
-        .order("transfer_date", { ascending: false });
+        .is("date", null)
+        .not("transfer_date", "is", null);
+
       if (error) throw error;
       return data ?? [];
     },
   });
+
   const [incoming, setIncoming] = useState<any[]>([]);
-  useEffect(() => {
-    setIncoming(incomingData ?? []);
-  }, [incomingData]);
+  useEffect(() => setIncoming(incomingData || []), [incomingData]);
 
+  // Accepted = date IS NOT NULL
   const { data: inventoryData } = useQuery({
-    queryKey: ["supermarket-accepted", selectedSupermarket],
+    queryKey: ["inventory", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
-        .not("accepted_at", "is", null)
-        .order("accepted_at", { ascending: false });
+        .not("date", "is", null)
+        .order("date", { ascending: false });
+
       if (error) throw error;
       return data ?? [];
     },
   });
+
   const [inventory, setInventory] = useState<any[]>([]);
-  useEffect(() => {
-    setInventory(inventoryData ?? []);
-  }, [inventoryData]);
+  useEffect(() => setInventory(inventoryData || []), [inventoryData]);
 
-  const { data: trending = [] } = useQuery({
-    queryKey: ["trending", selectedSupermarket],
-    queryFn: async () => {
-      // try historical_sales first
-      const { data: hs } = await supabase
-        .from("historical_sales")
-        .select("product_name, quantity_sold")
-        .eq("supermarket_branch", selectedSupermarket)
-        .limit(500);
-      if (hs && hs.length > 0) {
-        const grouped = Object.values(
-          hs.reduce((acc: any, item: any) => {
-            if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            acc[item.product_name].total += Number(item.quantity_sold || 0);
-            return acc;
-          }, {})
-        ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
-        return grouped;
-      }
+  // ------------------------------------------------------------
+  // ACCEPT ITEM
+  // ------------------------------------------------------------
+  const handleAccept = async (id: string) => {
+    await supabase
+      .from("supermarket_stock")
+      .update({ date: new Date().toISOString() })
+      .eq("id", id);
 
-      // fallback to supermarket_stock quantities
-      const { data: ss } = await supabase
-        .from("supermarket_stock")
-        .select("product_name, quantity")
-        .eq("company_name", selectedSupermarket);
-      if (ss && ss.length > 0) {
-        const grouped = Object.values(
-          ss.reduce((acc: any, item: any) => {
-            if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            acc[item.product_name].total += Number(item.quantity || 0);
-            return acc;
-          }, {})
-        ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
-        return grouped;
-      }
-
-      return [];
-    },
-  });
-
-  const handleAccept = async (id: string, name: string) => {
-    try {
-      // Try to update accepted_at — if column doesn't exist, no-op but cast to any to avoid TS complaint
-      const { error } = await supabase.from("supermarket_stock").update({ accepted_at: new Date().toISOString() } as any).eq("id", id);
-      if (error) {
-        // If update fails because column doesn't exist, fallback: leave row and just mark it removed locally
-        console.warn("accept update error:", error.message);
-      }
-      // remove from local incoming immediately
-      setIncoming((prev) => prev.filter((p) => p.id !== id));
-      toast({ title: "Accepted", description: `${name} added to inventory` });
-      qc.invalidateQueries({ queryKey: ["supermarket-incoming", selectedSupermarket] });
-      qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
-    }
+    setIncoming((prev) => prev.filter((i) => i.id !== id));
+    qc.invalidateQueries();
   };
 
-  const handleReject = async (id: string, name: string) => {
-    try {
-      const { error } = await supabase.from("supermarket_stock").delete().eq("id", id);
-      if (error) throw error;
-      setIncoming((prev) => prev.filter((p) => p.id !== id));
-      toast({ title: "Rejected", description: `${name} removed` });
-      qc.invalidateQueries({ queryKey: ["supermarket-incoming", selectedSupermarket] });
-      qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
-    }
+  // ------------------------------------------------------------
+  // REJECT ITEM
+  // ------------------------------------------------------------
+  const handleReject = async (id: string) => {
+    await supabase.from("supermarket_stock").delete().eq("id", id);
+    setIncoming((prev) => prev.filter((i) => i.id !== id));
   };
 
+  // ------------------------------------------------------------
+  // SHIP TO LOCAL MARKET
+  // ------------------------------------------------------------
   const handleShipToLocal = async (item: any) => {
-    try {
-      // prompt to pick local market
-      const choice = prompt(`Send "${item.product_name}" to which local market?\n${LOCAL_MARKETS.join("\n")}`, LOCAL_MARKETS[0]);
-      if (!choice) return;
-      if (!LOCAL_MARKETS.includes(choice)) {
-        alert("Invalid local market");
-        return;
-      }
+    const choice = prompt("Send to:", LOCAL_MARKETS[0]);
+    if (!choice) return;
 
-      const payload = {
-        product_id: item.product_id,
-        product_name: item.product_name,
-        category: item.category,
-        company_name: choice,
-        is_perishable: item.is_perishable ?? false,
-        shelf_life_days: item.shelf_life_days ?? 0,
-        storage_temperature: item.storage_temperature ?? "Ambient",
-        lot_id: item.lot_id ?? `LOT-${Date.now().toString(36).slice(-6)}`,
-        quantity: item.quantity,
-        manufacturing_date: item.manufacturing_date ?? new Date().toISOString(),
-        expiry_date: item.expiry_date ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
-        price_per_unit: Number(item.price_per_unit) * 0.8,
-        source_supermarket: item.company_name ?? selectedSupermarket,
-        transfer_date: new Date().toISOString(),
-      } as any;
+    const payload = {
+      product_id: item.product_id,
+      product_name: item.product_name,
+      category: item.category,
+      company_name: choice,
+      is_perishable: item.is_perishable,
+      shelf_life_days: item.shelf_life_days,
+      storage_temperature: item.storage_temperature,
+      lot_id: item.lot_id,
+      quantity: item.quantity,
+      manufacturing_date: item.manufacturing_date,
+      expiry_date: item.expiry_date,
+      price_per_unit: item.price_per_unit,
+      source_supermarket: item.company_name,
+      transfer_date: new Date().toISOString(),
+    };
 
-      const { error } = await supabase.from("localmarket_stock").insert([payload]);
-      if (error) throw error;
-
-      // delete original from supermarket_stock if exists
-      if (item.id) {
-        await supabase.from("supermarket_stock").delete().eq("id", item.id);
-      }
-
-      // remove from local inventory list
-      setInventory((prev) => prev.filter((p) => p.id !== item.id));
-      toast({ title: "Shipped", description: `${item.product_name} sent to ${choice}` });
-      qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
-      qc.invalidateQueries({ queryKey: ["localmarket-pending", choice] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err?.message ?? "Failed to ship", variant: "destructive" });
-    }
+    await supabase.from("localmarket_stock").insert([payload]);
+    await supabase.from("supermarket_stock").delete().eq("id", item.id);
+    setInventory((prev) => prev.filter((i) => i.id !== item.id));
   };
 
+  // ------------------------------------------------------------
+  // EXPIRING SOON
+  // ------------------------------------------------------------
   const expiringSoon = useMemo(() => {
     const now = Date.now();
-    return (inventory || []).filter((it: any) => {
-      if (!it?.expiry_date) return false;
-      const diff = (new Date(it.expiry_date).getTime() - now) / (1000 * 60 * 60 * 24);
-      return diff >= 0 && diff <= 7;
-    }).slice(0, 10);
+
+    return inventory
+      .filter((it: any) => {
+        const diff =
+          (new Date(it.expiry_date).getTime() - now) /
+          (1000 * 60 * 60 * 24);
+        return diff >= 0 && diff <= 7;
+      })
+      .slice(0, 10);
   }, [inventory]);
 
-  const productList = Array.from(new Set((inventory || []).map((i: any) => i.product_name)));
+  // ------------------------------------------------------------
+  // RENDER UI
+  // ------------------------------------------------------------
 
   return (
     <div className="space-y-6 p-4">
-      <div className="flex items-center gap-4">
-        <h3 className="font-medium">Select Supermarket:</h3>
+      {/* SELECT SUPERMARKET */}
+      <div className="flex gap-4 items-center">
+        <h3>Select Supermarket:</h3>
         <select
           value={selectedSupermarket}
           onChange={(e) => setSelectedSupermarket(e.target.value)}
-          className="p-2 border rounded"
+          className="p-2 rounded border"
         >
-          {SUPERMARKETS.map((s) => <option key={s} value={s}>{s}</option>)}
+          {SUPERMARKETS.map((s) => (
+            <option key={s}>{s}</option>
+          ))}
         </select>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-2 space-y-6">
-          <DemandAnalysis branch={selectedSupermarket} />
 
+        {/* LEFT SIDE */}
+        <div className="lg:col-span-2 space-y-6">
+
+          {/* CURRENTLY IN DEMAND */}
           <Card>
             <CardHeader>
-              <CardTitle>Incoming Stock (for {selectedSupermarket})</CardTitle>
-              <CardDescription>Accept or reject incoming transfers</CardDescription>
+              <CardTitle>Currently in Demand (last 14 days)</CardTitle>
             </CardHeader>
             <CardContent>
-              {incoming.length === 0 ? (
-                <p className="text-muted-foreground text-center py-6">No incoming stock</p>
-              ) : incoming.map((it) => (
-                <div key={it.id} className="flex items-center justify-between p-3 bg-muted/30 rounded mb-2">
-                  <div>
-                    <p className="font-medium">{it.product_name}</p>
-                    <p className="text-xs text-muted-foreground">{it.quantity} units • {it.category}</p>
-                    <p className="text-xs text-muted-foreground">From: {it.source_producer ?? it.source ?? ""}</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button onClick={() => handleAccept(it.id, it.product_name)}><Check /> Accept</Button>
-                    <Button variant="destructive" onClick={() => handleReject(it.id, it.product_name)}><X /> Reject</Button>
-                  </div>
-                </div>
-              ))}
+              {recentDemand.length === 0 ? (
+                <p>No data</p>
+              ) : (
+                <ol className="list-decimal ml-5">
+                  {recentDemand.map((i: any, idx) => (
+                    <li key={idx}>
+                      {i.product_name} — {i.total}
+                    </li>
+                  ))}
+                </ol>
+              )}
             </CardContent>
           </Card>
 
+          {/* INCOMING STOCK */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Incoming Stock</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {incoming.length === 0 ? (
+                <p>No incoming stock</p>
+              ) : (
+                incoming.map((item: any) => (
+                  <div key={item.id} className="flex justify-between p-3 bg-muted rounded mb-2">
+                    <div>
+                      <p>{item.product_name}</p>
+                      <p className="text-xs">{item.quantity} units</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button onClick={() => handleAccept(item.id)}><Check /></Button>
+                      <Button variant="destructive" onClick={() => handleReject(item.id)}><X /></Button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          {/* DEMAND PREDICTION */}
           <Card>
             <CardHeader>
               <CardTitle>Demand Prediction</CardTitle>
-              <CardDescription>Select product to forecast</CardDescription>
             </CardHeader>
-
             <CardContent>
-              <select className="w-full p-2 border rounded mb-4" value={selectedProduct} onChange={(e) => setSelectedProduct(e.target.value)}>
+              <select
+                className="w-full border p-2 rounded mb-4"
+                value={selectedProduct}
+                onChange={(e) => setSelectedProduct(e.target.value)}
+              >
                 <option value="">Select product</option>
-                {productList.map((p) => <option key={p} value={p}>{p}</option>)}
+                {[...new Set(csvData.map((r) => r.Product_Name))].map((p) => (
+                  <option key={p}>{p}</option>
+                ))}
               </select>
-              {selectedProduct ? <PredictionChart productName={selectedProduct} branch={selectedSupermarket} /> : <div className="text-muted-foreground">Choose a product to see forecast</div>}
+
+              <PredictionChart csvData={csvData} productName={selectedProduct} />
             </CardContent>
           </Card>
 
           <UniversalPool currentPlace={selectedSupermarket} />
         </div>
 
+        {/* RIGHT SIDE */}
         <div className="space-y-6">
+
+          {/* ACCEPTED INVENTORY */}
           <Card>
             <CardHeader>
               <CardTitle>Accepted Inventory</CardTitle>
-              <CardDescription>Manage stock for {selectedSupermarket}</CardDescription>
             </CardHeader>
             <CardContent>
-              {(inventory || []).length === 0 ? (
-                <p className="text-muted-foreground">No inventory available</p>
-              ) : (inventory || []).map((item: any) => (
-                <div key={item.id} className="flex items-center justify-between p-3 bg-muted/30 rounded mb-2">
-                  <div>
-                    <p className="font-medium">{item.product_name}</p>
-                    <p className="text-xs text-muted-foreground">{item.quantity} units • {item.category}</p>
+              {inventory.length === 0 ? (
+                <p>No inventory</p>
+              ) : (
+                inventory.map((item) => (
+                  <div key={item.id} className="flex justify-between p-3 bg-muted rounded mb-2">
+                    <div>
+                      <p>{item.product_name}</p>
+                      <p className="text-xs">{item.quantity} units</p>
+                    </div>
+                    <Button variant="outline" onClick={() => handleShipToLocal(item)}>
+                      <Send />
+                    </Button>
                   </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" onClick={() => handleShipToLocal(item)}><Send /> Ship to Local</Button>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </CardContent>
           </Card>
 
-          <Card className="border-destructive">
+          {/* EXPIRING SOON */}
+          <Card>
             <CardHeader>
-              <CardTitle className="text-destructive">Expiring Soon</CardTitle>
-              <CardDescription>Items expiring in next 7 days</CardDescription>
+              <CardTitle>Expiring Soon</CardTitle>
             </CardHeader>
             <CardContent>
               {expiringSoon.length === 0 ? (
-                <p className="text-muted-foreground text-center">No expiring items</p>
-              ) : expiringSoon.map((it: any) => (
-                <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2 flex justify-between">
-                  <div>
-                    <p className="font-medium text-destructive">{it.product_name}</p>
-                    <p className="text-xs text-muted-foreground">{it.quantity} units</p>
+                <p>No expiring items</p>
+              ) : (
+                expiringSoon.map((it) => (
+                  <div key={it.id} className="p-3 bg-red-100 rounded mb-2 flex justify-between">
+                    <div>
+                      <p className="font-semibold text-red-600">{it.product_name}</p>
+                      <p className="text-xs">{it.quantity} units</p>
+                    </div>
+                    <Button size="sm" onClick={() => handleShipToLocal(it)}>
+                      Send
+                    </Button>
                   </div>
-                  <div>
-                    <Button size="sm" onClick={() => handleShipToLocal(it)}>Send</Button>
-                  </div>
-                </div>
-              ))}
+                ))
+              )}
             </CardContent>
           </Card>
 
+          {/* TRENDING PRODUCTS */}
           <Card>
             <CardHeader>
-              <CardTitle>Trending (Top 10)</CardTitle>
-              <CardDescription>By sales or available quantity</CardDescription>
+              <CardTitle>Trending Products</CardTitle>
             </CardHeader>
             <CardContent>
-              {(trending || []).length === 0 ? (
-                <div className="text-muted-foreground">No trending data</div>
-              ) : (trending || []).map((t: any, idx: number) => (
-                <div key={idx} className="flex justify-between py-1">
-                  <div className="text-sm">{t.product_name}</div>
-                  <div className="text-sm font-medium">{t.total ?? t.quantity_sold ?? 0}</div>
-                </div>
-              ))}
+              {trending.length === 0 ? (
+                <p>No data</p>
+              ) : (
+                trending.map((item: any, idx) => (
+                  <div key={idx} className="flex justify-between py-1">
+                    <span>{item.product_name}</span>
+                    <span className="font-bold">{item.total}</span>
+                  </div>
+                ))
+              )}
             </CardContent>
           </Card>
+
         </div>
       </div>
     </div>
