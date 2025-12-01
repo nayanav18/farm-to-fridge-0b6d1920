@@ -1,68 +1,135 @@
 // src/components/PredictionChart.tsx
-import React from "react";
-import { useQuery } from "@tanstack/react-query";
+import React, { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
+import { Line } from "react-chartjs-2";
+import {
+  Chart as ChartJS,
+  TimeScale,
+  LinearScale,
+  PointElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+} from "chart.js";
+import 'chartjs-adapter-luxon';
+import { DateTime } from "luxon";
 
-/**
- * PredictionChart
- * - Fetches historical_sales for product + branch and plots recent sales (simple visualization)
- * - If you later want to call your RF model endpoint, replace fetch logic with a call to that endpoint.
- */
+ChartJS.register(TimeScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend);
 
-type Props = { productName: string; branch?: string };
-
-const PredictionChart: React.FC<Props> = ({ productName, branch }) => {
-  const { data = [] } = useQuery({
-    queryKey: ["prediction", branch, productName],
-    queryFn: async () => {
-      // try historical_sales
-      const { data: hs } = await supabase
-        .from("historical_sales")
-        .select("date, quantity_sold")
-        .eq("product_name", productName)
-        .eq("supermarket_branch", branch ?? "")
-        .order("date", { ascending: true })
-        .limit(365);
-      if (hs && hs.length > 0) {
-        return hs.map((r: any) => ({ date: r.date, value: Number(r.quantity_sold) }));
-      }
-
-      // fallback: aggregate supermarket_stock changes (not ideal, but gives something)
-      const { data: ss } = await supabase
-        .from("supermarket_stock")
-        .select("date, quantity")
-        .like("product_name", `%${productName}%`)
-        .order("date", { ascending: true })
-        .limit(365);
-      if (ss && ss.length > 0) {
-        return ss.map((r: any) => ({ date: r.date ?? r.transfer_date ?? "", value: Number(r.quantity ?? 0) }));
-      }
-
-      return [];
-    },
-  });
-
-  if (!data || data.length === 0) {
-    return <div className="text-muted-foreground">No historical sales data available for "{productName}"</div>;
-  }
-
-  // prepare simple display data (limit to last 30)
-  const display = data.slice(-30).map((d: any) => ({ date: d.date.slice(5), value: d.value ?? 0 }));
-
-  return (
-    <div style={{ height: 240 }}>
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={display}>
-          <CartesianGrid strokeDasharray="3 3" />
-          <XAxis dataKey="date" interval={Math.max(0, Math.floor(display.length / 8))} />
-          <YAxis />
-          <Tooltip />
-          <Line type="monotone" dataKey="value" stroke="#3b82f6" strokeWidth={2} dot={{ r: 2 }} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
+type Props = {
+  productName: string;
+  branch?: string; // supermarket branch or local market name
+  // If you have an API endpoint for your RF model, pass it here via env and call it instead.
 };
 
-export default PredictionChart;
+export default function PredictionChart({ productName, branch }: Props) {
+  const [historical, setHistorical] = useState<{ date: string; demand: number }[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    if (!productName) return;
+    setLoading(true);
+
+    // Try to fetch historical_sales for this product + branch
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("historical_sales")
+          .select("date, quantity_sold")
+          .eq("product_name", productName)
+          .maybeSingle(); // sometimes aggregated table shape differs
+
+        // If the `historical_sales` holds aggregated daily rows, query them properly:
+        // We'll also try another query for multiple rows:
+        const { data: rows, error: rowsErr } = await supabase
+          .from("historical_sales")
+          .select("date, quantity_sold")
+          .eq("product_name", productName)
+          .order("date", { ascending: true })
+          .limit(365);
+
+        if (rowsErr) {
+          console.warn("historical_sales query error:", rowsErr);
+        }
+
+        if (rows && rows.length > 0) {
+          setHistorical(rows.map((r: any) => ({ date: r.date, demand: Number(r.quantity_sold || 0) })));
+        } else if (data && (data as any).quantity_sold) {
+          // single aggregated row — fallback
+          setHistorical([{ date: (data as any).date || new Date().toISOString(), demand: Number((data as any).quantity_sold || 0) }]);
+        } else {
+          // fallback: no historical data; attempt to build from supermarket_stock quantities (not ideal)
+          const { data: stockRows } = await supabase
+            .from("supermarket_stock")
+            .select("transfer_date as date, quantity as quantity_sold")
+            .eq("product_name", productName)
+            .order("transfer_date", { ascending: true })
+            .limit(365);
+
+          if (stockRows && stockRows.length > 0) {
+            setHistorical(stockRows.map((r: any) => ({ date: r.date || r.transfer_date, demand: Number(r.quantity_sold || r.quantity || 0) })));
+          } else {
+            setHistorical([]);
+          }
+        }
+      } catch (err) {
+        console.error(err);
+        setHistorical([]);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [productName, branch]);
+
+  // Create chart data (simple moving window)
+  const data = useMemo(() => {
+    const labels = historical.map((h) => new Date(h.date));
+    const values = historical.map((h) => h.demand);
+    return {
+      labels,
+      datasets: [
+        {
+          label: "Historical Demand",
+          data: values,
+          tension: 0.2,
+          fill: false,
+        },
+        // If you have a forecast series returned from an API, append it here as another dataset
+      ],
+    };
+  }, [historical]);
+
+  if (!productName) {
+    return <div className="text-muted-foreground">Choose a product to see forecast</div>;
+  }
+
+  if (loading) {
+    return <div className="text-muted-foreground">Loading data...</div>;
+  }
+
+  if (historical.length === 0) {
+    return <div className="text-muted-foreground">No historical data available for {productName}</div>;
+  }
+
+  return (
+    <div>
+      <Line
+        data={data}
+        options={{
+          responsive: true,
+          interaction: { mode: 'index', intersect: false },
+          scales: {
+            x: {
+              type: 'time',
+              time: {
+                unit: 'day'
+              },
+            },
+            y: { beginAtZero: true },
+          },
+        }}
+      />
+    </div>
+  );
+}

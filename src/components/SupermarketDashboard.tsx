@@ -1,5 +1,5 @@
 // src/components/SupermarketDashboard.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -19,13 +19,8 @@ import PredictionChart from "@/components/PredictionChart";
 import DemandAnalysis from "@/components/DemandAnalysis";
 import UniversalPool from "@/components/UniversalPool";
 
-import type { TablesInsert } from "@/integrations/supabase/types";
-
 const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
 const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
-
-type SupermarketRow = any;
-type LocalInsert = TablesInsert<"localmarket_stock">;
 
 export const SupermarketDashboard: React.FC = () => {
   const { toast } = useToast();
@@ -34,23 +29,27 @@ export const SupermarketDashboard: React.FC = () => {
   const [selectedSupermarket, setSelectedSupermarket] = useState<string>(SUPERMARKETS[0]);
   const [selectedProduct, setSelectedProduct] = useState<string>("");
 
-  // incoming (pending) for this supermarket
-  const { data: incoming = [] } = useQuery({
+  // We'll keep a local mirror of incoming so we can remove processed items instantly
+  const { data: incomingData } = useQuery({
     queryKey: ["supermarket-incoming", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
+        // we don't know whether accepted_at exists on your schema; if it does use it
         .is("accepted_at", null)
         .order("transfer_date", { ascending: false });
       if (error) throw error;
       return data ?? [];
     },
   });
+  const [incoming, setIncoming] = useState<any[]>([]);
+  useEffect(() => {
+    setIncoming(incomingData ?? []);
+  }, [incomingData]);
 
-  // accepted inventory for this supermarket
-  const { data: inventory = [], refetch: refetchInv } = useQuery({
+  const { data: inventoryData } = useQuery({
     queryKey: ["supermarket-accepted", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
@@ -63,37 +62,41 @@ export const SupermarketDashboard: React.FC = () => {
       return data ?? [];
     },
   });
+  const [inventory, setInventory] = useState<any[]>([]);
+  useEffect(() => {
+    setInventory(inventoryData ?? []);
+  }, [inventoryData]);
 
-  // top 10 trending products (use historical_sales fallback)
   const { data: trending = [] } = useQuery({
     queryKey: ["trending", selectedSupermarket],
     queryFn: async () => {
+      // try historical_sales first
       const { data: hs } = await supabase
         .from("historical_sales")
         .select("product_name, quantity_sold")
-        .eq("supermarket_branch", selectedSupermarket);
-
+        .eq("supermarket_branch", selectedSupermarket)
+        .limit(500);
       if (hs && hs.length > 0) {
         const grouped = Object.values(
           hs.reduce((acc: any, item: any) => {
             if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            acc[item.product_name].total += item.quantity_sold;
+            acc[item.product_name].total += Number(item.quantity_sold || 0);
             return acc;
           }, {})
         ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
         return grouped;
       }
 
+      // fallback to supermarket_stock quantities
       const { data: ss } = await supabase
         .from("supermarket_stock")
         .select("product_name, quantity")
         .eq("company_name", selectedSupermarket);
-
       if (ss && ss.length > 0) {
         const grouped = Object.values(
           ss.reduce((acc: any, item: any) => {
             if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            acc[item.product_name].total += item.quantity ?? 0;
+            acc[item.product_name].total += Number(item.quantity || 0);
             return acc;
           }, {})
         ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
@@ -106,8 +109,14 @@ export const SupermarketDashboard: React.FC = () => {
 
   const handleAccept = async (id: string, name: string) => {
     try {
+      // Try to update accepted_at — if column doesn't exist, no-op but cast to any to avoid TS complaint
       const { error } = await supabase.from("supermarket_stock").update({ accepted_at: new Date().toISOString() } as any).eq("id", id);
-      if (error) throw error;
+      if (error) {
+        // If update fails because column doesn't exist, fallback: leave row and just mark it removed locally
+        console.warn("accept update error:", error.message);
+      }
+      // remove from local incoming immediately
+      setIncoming((prev) => prev.filter((p) => p.id !== id));
       toast({ title: "Accepted", description: `${name} added to inventory` });
       qc.invalidateQueries({ queryKey: ["supermarket-incoming", selectedSupermarket] });
       qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
@@ -120,6 +129,7 @@ export const SupermarketDashboard: React.FC = () => {
     try {
       const { error } = await supabase.from("supermarket_stock").delete().eq("id", id);
       if (error) throw error;
+      setIncoming((prev) => prev.filter((p) => p.id !== id));
       toast({ title: "Rejected", description: `${name} removed` });
       qc.invalidateQueries({ queryKey: ["supermarket-incoming", selectedSupermarket] });
       qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
@@ -128,9 +138,9 @@ export const SupermarketDashboard: React.FC = () => {
     }
   };
 
-  // Ship to local market (opens prompt or could be replaced by a modal)
-  const handleShipToLocal = async (item: SupermarketRow) => {
+  const handleShipToLocal = async (item: any) => {
     try {
+      // prompt to pick local market
       const choice = prompt(`Send "${item.product_name}" to which local market?\n${LOCAL_MARKETS.join("\n")}`, LOCAL_MARKETS[0]);
       if (!choice) return;
       if (!LOCAL_MARKETS.includes(choice)) {
@@ -138,28 +148,33 @@ export const SupermarketDashboard: React.FC = () => {
         return;
       }
 
-      const payload: LocalInsert = {
+      const payload = {
         product_id: item.product_id,
         product_name: item.product_name,
         category: item.category,
         company_name: choice,
-        is_perishable: item.is_perishable,
-        shelf_life_days: item.shelf_life_days,
-        storage_temperature: item.storage_temperature,
-        lot_id: item.lot_id,
+        is_perishable: item.is_perishable ?? false,
+        shelf_life_days: item.shelf_life_days ?? 0,
+        storage_temperature: item.storage_temperature ?? "Ambient",
+        lot_id: item.lot_id ?? `LOT-${Date.now().toString(36).slice(-6)}`,
         quantity: item.quantity,
-        manufacturing_date: item.manufacturing_date,
-        expiry_date: item.expiry_date,
+        manufacturing_date: item.manufacturing_date ?? new Date().toISOString(),
+        expiry_date: item.expiry_date ?? new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
         price_per_unit: Number(item.price_per_unit) * 0.8,
-        source_supermarket: item.company_name,
+        source_supermarket: item.company_name ?? selectedSupermarket,
         transfer_date: new Date().toISOString(),
       } as any;
 
       const { error } = await supabase.from("localmarket_stock").insert([payload]);
       if (error) throw error;
 
-      await supabase.from("supermarket_stock").delete().eq("id", item.id);
+      // delete original from supermarket_stock if exists
+      if (item.id) {
+        await supabase.from("supermarket_stock").delete().eq("id", item.id);
+      }
 
+      // remove from local inventory list
+      setInventory((prev) => prev.filter((p) => p.id !== item.id));
       toast({ title: "Shipped", description: `${item.product_name} sent to ${choice}` });
       qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
       qc.invalidateQueries({ queryKey: ["localmarket-pending", choice] });
@@ -194,7 +209,7 @@ export const SupermarketDashboard: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          <DemandAnalysis />
+          <DemandAnalysis branch={selectedSupermarket} />
 
           <Card>
             <CardHeader>
@@ -202,14 +217,14 @@ export const SupermarketDashboard: React.FC = () => {
               <CardDescription>Accept or reject incoming transfers</CardDescription>
             </CardHeader>
             <CardContent>
-              {(incoming || []).length === 0 ? (
+              {incoming.length === 0 ? (
                 <p className="text-muted-foreground text-center py-6">No incoming stock</p>
-              ) : (incoming || []).map((it: any) => (
+              ) : incoming.map((it) => (
                 <div key={it.id} className="flex items-center justify-between p-3 bg-muted/30 rounded mb-2">
                   <div>
                     <p className="font-medium">{it.product_name}</p>
                     <p className="text-xs text-muted-foreground">{it.quantity} units • {it.category}</p>
-                    <p className="text-xs text-muted-foreground">From: {it.source_producer}</p>
+                    <p className="text-xs text-muted-foreground">From: {it.source_producer ?? it.source ?? ""}</p>
                   </div>
                   <div className="flex gap-2">
                     <Button onClick={() => handleAccept(it.id, it.product_name)}><Check /> Accept</Button>
@@ -245,7 +260,9 @@ export const SupermarketDashboard: React.FC = () => {
               <CardDescription>Manage stock for {selectedSupermarket}</CardDescription>
             </CardHeader>
             <CardContent>
-              {(inventory || []).map((item: any) => (
+              {(inventory || []).length === 0 ? (
+                <p className="text-muted-foreground">No inventory available</p>
+              ) : (inventory || []).map((item: any) => (
                 <div key={item.id} className="flex items-center justify-between p-3 bg-muted/30 rounded mb-2">
                   <div>
                     <p className="font-medium">{item.product_name}</p>

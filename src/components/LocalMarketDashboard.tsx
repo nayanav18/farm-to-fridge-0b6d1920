@@ -1,5 +1,5 @@
 // src/components/LocalMarketDashboard.tsx
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
@@ -16,7 +16,7 @@ import UniversalPool from "@/components/UniversalPool";
 const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
 
-export const LocalMarketDashboard: React.FC = () => {
+export default function LocalMarketDashboard() {
   const { toast } = useToast();
   const qc = useQueryClient();
 
@@ -25,38 +25,35 @@ export const LocalMarketDashboard: React.FC = () => {
   const [saleQty, setSaleQty] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
 
-  const { data: pendingTransfers = [] } = useQuery({
+  const { data: pendingData } = useQuery({
     queryKey: ["localmarket-pending", selectedLocalMarket],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("localmarket_stock")
-        .select("*")
-        .eq("company_name", selectedLocalMarket)
-        .is("accepted_at", null)
-        .order("transfer_date", { ascending: false });
+      const { data, error } = await supabase.from("localmarket_stock").select("*").eq("company_name", selectedLocalMarket).is("accepted_at", null).order("transfer_date", { ascending: false });
       if (error) throw error;
       return data ?? [];
     },
   });
+  const [pendingTransfers, setPendingTransfers] = useState<any[]>([]);
+  useEffect(() => setPendingTransfers(pendingData ?? []), [pendingData]);
 
-  const { data: acceptedStock = [], refetch: refetchAccepted } = useQuery({
+  const { data: acceptedData } = useQuery({
     queryKey: ["localmarket-accepted", selectedLocalMarket],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("localmarket_stock")
-        .select("*")
-        .eq("company_name", selectedLocalMarket)
-        .not("accepted_at", "is", null)
-        .order("accepted_at", { ascending: false });
+      const { data, error } = await supabase.from("localmarket_stock").select("*").eq("company_name", selectedLocalMarket).not("accepted_at", "is", null).order("accepted_at", { ascending: false });
       if (error) throw error;
       return data ?? [];
     },
   });
+  const [acceptedStock, setAcceptedStock] = useState<any[]>([]);
+  useEffect(() => setAcceptedStock(acceptedData ?? []), [acceptedData]);
 
   const handleAcceptTransfer = async (id: string, productName: string) => {
     try {
       const { error } = await supabase.from("localmarket_stock").update({ accepted_at: new Date().toISOString() } as any).eq("id", id);
-      if (error) throw error;
+      if (error) {
+        console.warn("accept error", error.message);
+      }
+      setPendingTransfers((p) => p.filter((x) => x.id !== id));
       toast({ title: "Accepted", description: `${productName} added to inventory.` });
       qc.invalidateQueries({ queryKey: ["localmarket-pending", selectedLocalMarket] });
       qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
@@ -99,7 +96,7 @@ export const LocalMarketDashboard: React.FC = () => {
 
   const handleSendFromLocal = async (item: any) => {
     try {
-      const choice = prompt(`Send "${item.product_name}" to:\nType as supermarket:<name> or local:<name>\nExamples:\nsupermarket:Supermarket A\nlocal:Local Market B`);
+      const choice = prompt(`Send ${item.product_name} to:\nsupermarket:<name> OR local:<name>\nExamples:\nsupermarket:Supermarket A\nlocal:Local Market B`);
       if (!choice) return;
       const parts = choice.split(":");
       if (parts.length !== 2) return alert("Invalid selection format");
@@ -156,19 +153,19 @@ export const LocalMarketDashboard: React.FC = () => {
     }
   };
 
-  // trending top 10
   const { data: trending = [] } = useQuery({
     queryKey: ["local-trending", selectedLocalMarket],
     queryFn: async () => {
       const { data: hs } = await supabase
         .from("historical_sales")
         .select("product_name, quantity_sold")
-        .eq("supermarket_branch", selectedLocalMarket);
+        .eq("supermarket_branch", selectedLocalMarket)
+        .limit(100);
       if (hs && hs.length > 0) {
         const grouped = Object.values(
           hs.reduce((acc: any, item: any) => {
             if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            acc[item.product_name].total += item.quantity_sold;
+            acc[item.product_name].total += Number(item.quantity_sold || 0);
             return acc;
           }, {})
         ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
@@ -274,7 +271,7 @@ export const LocalMarketDashboard: React.FC = () => {
                     <div className="text-xs text-muted-foreground">{a.quantity} units • ₹{a.price_per_unit}</div>
                   </div>
                   <div>
-                    <Button variant="outline" onClick={() => { setSaleItem(a); }}>Log Sale</Button>
+                    <Button variant="outline" onClick={() => { setSaleItem(a); }}>{`Log Sale`}</Button>
                   </div>
                 </div>
               ))}
@@ -290,7 +287,7 @@ export const LocalMarketDashboard: React.FC = () => {
                 (trending || []).map((t: any, i: number) => (
                 <div key={i} className="flex justify-between py-1">
                   <div>{t.product_name}</div>
-                  <div className="font-medium">{t.total ?? t.quantity ?? 0}</div>
+                  <div className="font-medium">{t.total ?? 0}</div>
                 </div>
               ))}
             </CardContent>
@@ -311,6 +308,4 @@ export const LocalMarketDashboard: React.FC = () => {
       </Dialog>
     </div>
   );
-};
-
-export default LocalMarketDashboard;
+}

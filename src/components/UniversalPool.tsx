@@ -1,169 +1,154 @@
 // src/components/UniversalPool.tsx
 import React, { useEffect, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
-import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "@/components/ui/card";
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 
-/**
- * UniversalPool
- * - Shows both requests and available posts (overstock / near-expiry).
- * - Allows current place (supermarket/local) to post an overstock or accept a posted item.
- *
- * Schema: we store pool entries in supermarket_stock/localmarket_stock (existing tables)
- * For the pool, we use a simple approach: entries with transfer_date = null AND a custom flag `pool_posted` could be used,
- * but to avoid DB changes we store pool items in a small helper table 'universal_pool' (if you don't have it, this uses local JS aggregation).
- *
- * This component uses supabase to read and write to a simple helper table `universal_pool` (create with SQL if required):
- *
- * CREATE TABLE universal_pool (
- *   id uuid primary key default gen_random_uuid(),
- *   product_id int,
- *   product_name text,
- *   category text,
- *   quantity int,
- *   price_per_unit numeric,
- *   source text, -- where it came from
- *   target_type text, -- "any" or "supermarket" or "local"
- *   target_name text,
- *   created_at timestamptz default now()
- * );
- *
- * If you don't want to create this table, the component will still show a fallback message and allow posting directly to local/supermarket tables.
- */
+type PoolRow = any;
 
-type Props = { currentPlace?: string };
-
-const UniversalPool: React.FC<Props> = ({ currentPlace }) => {
+export default function UniversalPool({ currentPlace }: { currentPlace?: string }) {
   const { toast } = useToast();
-  const qc = useQueryClient();
-  const [posting, setPosting] = useState(false);
+  const [pool, setPool] = useState<PoolRow[]>([]);
+  const [loading, setLoading] = useState(false);
 
-  const { data: pool = [] } = useQuery({
-    queryKey: ["universal-pool"],
-    queryFn: async () => {
-      // try to fetch a `universal_pool` table; if missing, return []
-      const { data, error } = await (supabase as any).from("universal_pool").select("*").order("created_at", { ascending: false });
-      if ((error as any)?.code === "42P01" || (error as any)?.message?.includes("relation") ) {
-        // table not present; return empty and let users use fallback
-        return [];
-      }
-      if (error) throw error;
-      return data ?? [];
-    },
-    enabled: true,
-  });
-
-  const handlePostToPool = async () => {
-    // small prompt-based quick post (replace with a full form if you want)
-    const name = prompt("Product name to post to pool:");
-    if (!name) return;
-    const qtyStr = prompt("Quantity:");
-    const qty = Number(qtyStr || "0");
-    if (!qty || qty <= 0) return alert("Invalid qty");
+  const fetchPool = async () => {
+    setLoading(true);
     try {
-      setPosting(true);
+      // Try to read universal_pool — if table missing, supabase will return error
+      const { data, error } = await supabase.from("universal_pool" as any).select("*").order("created_at", { ascending: false }).limit(100);
+      if (error) {
+        // table missing or other error
+        console.warn("universal_pool read error:", error.message);
+        setPool([]);
+        setLoading(false);
+        return;
+      }
+      setPool(data ?? []);
+    } catch (err) {
+      console.error(err);
+      setPool([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchPool();
+  }, []);
+
+  const postToPool = async () => {
+    // Post modal/prompt: choose item & qty to post
+    const product_name = prompt("Product name to post to the universal pool:");
+    if (!product_name) return;
+    const qtyStr = prompt("Quantity:");
+    if (!qtyStr) return;
+    const qty = Number(qtyStr);
+    if (isNaN(qty) || qty <= 0) return alert("Invalid quantity");
+
+    try {
       const payload = {
-        product_name: name,
+        product_name,
         quantity: qty,
         source: currentPlace || "unknown",
-        target_type: "any",
-        target_name: null,
+        created_at: new Date().toISOString(),
       } as any;
-      const { error } = await (supabase as any).from("universal_pool").insert([payload]);
+      const { error } = await supabase.from("universal_pool" as any).insert([payload]);
       if (error) throw error;
-      toast({ title: "Posted", description: `${name} posted to universal pool` });
-      qc.invalidateQueries({ queryKey: ["universal-pool"] });
+      toast({ title: "Posted", description: `Posted ${product_name} x${qty} to pool` });
+      fetchPool();
     } catch (err: any) {
       toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
-    } finally {
-      setPosting(false);
     }
   };
 
-  const handleAcceptPoolItem = async (item: any) => {
+  const acceptPool = async (row: PoolRow) => {
     try {
-      // accept: copy item into currentPlace's table (supermarket_stock or localmarket_stock)
-      if (!currentPlace) return alert("No target selected");
-      const kind = currentPlace.toLowerCase().includes("local") ? "localmarket_stock" : "supermarket_stock";
-      // create payload
-      const payload: any = {
-        product_name: item.product_name,
-        product_id: item.product_id ?? Math.floor(Date.now() / 1000) % 1000000,
-        category: item.category ?? "Other",
-        company_name: currentPlace,
-        quantity: item.quantity ?? 1,
-        price_per_unit: item.price_per_unit ?? 0,
-        manufacturing_date: new Date().toISOString().slice(0, 10),
-        expiry_date: new Date(Date.now() + 1000 * 60 * 60 * 24 * 7).toISOString().slice(0, 10), // 7 days default
-        lot_id: `POOL-${Date.now().toString(36).slice(-6)}`,
-        shelf_life_days: item.shelf_life_days ?? 7,
-        storage_temperature: item.storage_temperature ?? "Ambient",
-        transfer_date: new Date().toISOString(),
-      };
+      // Action on accept: insert into localmarket_stock or supermarket_stock based on type
+      const target = prompt(`Accept ${row.product_name} x${row.quantity} from pool. Send to (local/supermarket):\nExample: local:Local Market A or supermarket:Supermarket A`);
+      if (!target) return;
+      const parts = target.split(":");
+      if (parts.length !== 2) return alert("Invalid target format");
+      const [t, name] = parts;
+      if (t === "local") {
+        const payload = {
+          product_id: Math.floor(Date.now() / 1000) % 1000000,
+          product_name: row.product_name,
+          category: row.category ?? "Other",
+          company_name: name,
+          quantity: row.quantity,
+          transfer_date: new Date().toISOString(),
+          manufacturing_date: row.manufacturing_date ?? new Date().toISOString(),
+          expiry_date: row.expiry_date ?? new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+          price_per_unit: row.price_per_unit ?? 0,
+          shelf_life_days: row.shelf_life_days ?? 7,
+          storage_temperature: row.storage_temperature ?? "Ambient",
+          lot_id: row.lot_id ?? `POOL-${Date.now().toString(36).slice(-6)}`,
+          source_supermarket: row.source ?? null,
+        } as any;
+        const { error } = await supabase.from("localmarket_stock").insert([payload]);
+        if (error) throw error;
+      } else if (t === "supermarket") {
+        const payload = {
+          product_id: Math.floor(Date.now() / 1000) % 1000000,
+          product_name: row.product_name,
+          category: row.category ?? "Other",
+          company_name: name,
+          quantity: row.quantity,
+          transfer_date: new Date().toISOString(),
+          manufacturing_date: row.manufacturing_date ?? new Date().toISOString(),
+          expiry_date: row.expiry_date ?? new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString(),
+          price_per_unit: row.price_per_unit ?? 0,
+          shelf_life_days: row.shelf_life_days ?? 7,
+          storage_temperature: row.storage_temperature ?? "Ambient",
+          lot_id: row.lot_id ?? `POOL-${Date.now().toString(36).slice(-6)}`,
+          source_producer: row.source ?? null,
+        } as any;
+        const { error } = await supabase.from("supermarket_stock").insert([payload]);
+        if (error) throw error;
+      } else {
+        return alert("Invalid target type");
+      }
 
-      const { error } = await supabase.from(kind).insert([payload]);
-      if (error) throw error;
-
-      // delete pool item
-      await (supabase as any).from("universal_pool").delete().eq("id", item.id);
-
-      toast({ title: "Accepted", description: `${item.product_name} accepted into ${currentPlace}` });
-      qc.invalidateQueries({ queryKey: ["universal-pool"] });
-      qc.invalidateQueries({ queryKey: ["supermarket-accepted", currentPlace] });
-      qc.invalidateQueries({ queryKey: ["localmarket-accepted", currentPlace] });
+      // remove pool row after accept
+      const { error: delErr } = await supabase.from("universal_pool" as any).delete().eq("id", row.id);
+      if (delErr) console.warn("failed to delete pool row", delErr);
+      toast({ title: "Accepted", description: `Accepted ${row.product_name}` });
+      fetchPool();
     } catch (err: any) {
       toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
     }
   };
-
-  if (!pool || pool.length === 0) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle>Universal Pool</CardTitle>
-          <CardDescription>Share or request overstock / near-expiry items</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="text-muted-foreground py-4">
-            No pool entries (or `universal_pool` table missing). You can post an item to the pool which others can accept.
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={handlePostToPool} disabled={posting}>{posting ? "Posting..." : "Post to Pool"}</Button>
-          </div>
-        </CardContent>
-      </Card>
-    );
-  }
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Universal Pool</CardTitle>
-        <CardDescription>Anyone can post overstock / request — accept into your inventory</CardDescription>
+        <CardDescription>Share or request overstock / near-expiry items</CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="space-y-2">
-          {pool.map((p: any) => (
-            <div key={p.id} className="flex items-center justify-between p-2 bg-muted/20 rounded">
+        {loading ? (
+          <div className="text-muted-foreground">Loading pool...</div>
+        ) : pool.length === 0 ? (
+          <div className="text-muted-foreground">No pool entries (or `universal_pool` table missing).</div>
+        ) : (
+          pool.map((p) => (
+            <div key={p.id} className="flex items-center justify-between p-3 bg-muted/10 rounded mb-2">
               <div>
                 <div className="font-medium">{p.product_name}</div>
-                <div className="text-xs text-muted-foreground">{p.quantity} units • source: {p.source}</div>
+                <div className="text-xs text-muted-foreground">{p.quantity} units • from {p.source}</div>
               </div>
               <div className="flex gap-2">
-                <Button onClick={() => handleAcceptPoolItem(p)}>Accept into {currentPlace ?? "your place"}</Button>
+                <Button size="sm" onClick={() => acceptPool(p)}>Accept</Button>
               </div>
             </div>
-          ))}
-        </div>
+          ))
+        )}
 
-        <div className="mt-3">
-          <Button onClick={handlePostToPool} disabled={posting}>{posting ? "Posting..." : "Post to Pool"}</Button>
+        <div className="mt-4">
+          <Button onClick={postToPool}>Post to Pool</Button>
         </div>
       </CardContent>
     </Card>
   );
-};
-
-export default UniversalPool;
+}
