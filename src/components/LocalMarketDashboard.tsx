@@ -16,7 +16,7 @@ import UniversalPool from "@/components/UniversalPool";
 const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
 
-export default function LocalMarketDashboard() {
+export const LocalMarketDashboard: React.FC = () => {
   const { toast } = useToast();
   const qc = useQueryClient();
 
@@ -88,7 +88,6 @@ export default function LocalMarketDashboard() {
     }
   };
 
-  // expiring soon
   const expiringSoon = useMemo(() => {
     const now = Date.now();
     return (acceptedStock || []).filter((i: any) => {
@@ -100,7 +99,7 @@ export default function LocalMarketDashboard() {
 
   const handleSendFromLocal = async (item: any) => {
     try {
-      const choice = prompt(`Send ${item.product_name} to:\nTypes:\n- supermarket:<name>\n- local:<name>\nExamples:\nsupermarket:Supermarket A\nlocal:Local Market B`);
+      const choice = prompt(`Send "${item.product_name}" to:\nType as supermarket:<name> or local:<name>\nExamples:\nsupermarket:Supermarket A\nlocal:Local Market B`);
       if (!choice) return;
       const parts = choice.split(":");
       if (parts.length !== 2) return alert("Invalid selection format");
@@ -148,7 +147,7 @@ export default function LocalMarketDashboard() {
         return;
       }
 
-      // delete original
+      // delete original row
       await supabase.from("localmarket_stock").delete().eq("id", item.id);
       toast({ title: "Sent", description: `${item.product_name} sent` });
       qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
@@ -157,21 +156,27 @@ export default function LocalMarketDashboard() {
     }
   };
 
-  // trending top 10 for this local market
+  // trending top 10
   const { data: trending = [] } = useQuery({
     queryKey: ["local-trending", selectedLocalMarket],
     queryFn: async () => {
-      // use historical_sales if supermarket_branch equals local market or fallback
       const { data: hs } = await supabase
         .from("historical_sales")
-        .select("product_name")
-        .eq("supermarket_branch", selectedLocalMarket)
-        .order("quantity_sold", { ascending: false })
-        .limit(10);
-      if (hs && hs.length > 0) return hs;
+        .select("product_name, quantity_sold")
+        .eq("supermarket_branch", selectedLocalMarket);
+      if (hs && hs.length > 0) {
+        const grouped = Object.values(
+          hs.reduce((acc: any, item: any) => {
+            if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
+            acc[item.product_name].total += item.quantity_sold;
+            return acc;
+          }, {})
+        ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
+        return grouped;
+      }
       const { data: ss } = await supabase
         .from("localmarket_stock")
-        .select("product_name, quantity as total")
+        .select("product_name, quantity")
         .eq("company_name", selectedLocalMarket)
         .order("quantity", { ascending: false })
         .limit(10);
@@ -225,7 +230,7 @@ export default function LocalMarketDashboard() {
                 <option value="">Select product</option>
                 {productList.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
-              {selectedProduct ? <PredictionChart productName={selectedProduct} /> : <div className="text-muted-foreground">No product selected</div>}
+              {selectedProduct ? <PredictionChart productName={selectedProduct} branch={selectedLocalMarket} /> : <div className="text-muted-foreground">No product selected</div>}
             </CardContent>
           </Card>
 
@@ -285,7 +290,7 @@ export default function LocalMarketDashboard() {
                 (trending || []).map((t: any, i: number) => (
                 <div key={i} className="flex justify-between py-1">
                   <div>{t.product_name}</div>
-                  <div className="font-medium">{t.total ?? 0}</div>
+                  <div className="font-medium">{t.total ?? t.quantity ?? 0}</div>
                 </div>
               ))}
             </CardContent>
@@ -306,4 +311,6 @@ export default function LocalMarketDashboard() {
       </Dialog>
     </div>
   );
-}
+};
+
+export default LocalMarketDashboard;

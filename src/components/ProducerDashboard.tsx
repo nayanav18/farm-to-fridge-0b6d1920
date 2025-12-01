@@ -13,7 +13,13 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
 import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Loader2, Upload } from "lucide-react";
@@ -28,38 +34,13 @@ const CATEGORIES = [
   "Other",
 ];
 
-const STORAGE_OPTIONS = [
-  "Ambient",
-  "Refrigerated",
-  "Frozen",
-];
+const STORAGE_OPTIONS = ["Ambient", "Refrigerated", "Frozen"];
 
-const SUPERMARKETS = [
-  "Supermarket A",
-  "Supermarket B",
-  "Supermarket C",
-];
+const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
 
-type ProducerRow = {
-  id: string;
-  date: string;
-  product_id: number;
-  product_name: string;
-  category: string;
-  company_name: string;
-  is_perishable: boolean;
-  shelf_life_days: number;
-  storage_temperature: string;
-  lot_id: string;
-  stock_batch_quantity: number;
-  quantity_stocked: number;
-  manufacturing_date: string;
-  expiry_date: string;
-  price_per_unit: number;
-  created_at?: string | null;
-};
+type ProducerRow = any;
 
-export default function ProducerDashboard() {
+export const ProducerDashboard: React.FC = () => {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -79,7 +60,7 @@ export default function ProducerDashboard() {
   const updateField = (k: keyof typeof form, v: string) =>
     setForm((p) => ({ ...p, [k]: v }));
 
-  // derive shelf life days
+  // derive shelf life days (auto)
   const shelfLifeDays = useMemo(() => {
     if (!form.manufacturing_date || !form.expiry_date) return 0;
     const m = new Date(form.manufacturing_date);
@@ -88,20 +69,17 @@ export default function ProducerDashboard() {
     return diff > 0 ? diff : 0;
   }, [form.manufacturing_date, form.expiry_date]);
 
-  // fetch producer_stock for history view
+  // fetch producer_stock (history)
   const { data: producerStock = [], isRefetching: producerRefetching } = useQuery({
     queryKey: ["producer-stock"],
     queryFn: async () => {
-      const res = await supabase
-        .from("producer_stock")
-        .select("*")
-        .order("created_at", { ascending: false });
+      const res = await supabase.from("producer_stock").select("*").order("created_at", { ascending: false });
       if ((res as any)?.error) throw (res as any).error;
       return ((res as any)?.data ?? []) as ProducerRow[];
     },
   });
 
-  // mutation: insert into producer_stock and supermarket_stock
+  // upload mutation (inserts producer_stock & supermarket_stock)
   const uploadMutation = useMutation({
     mutationFn: async (payload: typeof form) => {
       const qty = Number(payload.quantity) || 0;
@@ -124,7 +102,7 @@ export default function ProducerDashboard() {
         expiry_date: payload.expiry_date,
         price_per_unit: price,
         date: new Date().toISOString().slice(0, 10),
-      };
+      } as any;
 
       const supermarketPayload = {
         product_id,
@@ -142,17 +120,18 @@ export default function ProducerDashboard() {
         source_producer: payload.company_name,
         transfer_date: new Date().toISOString(),
         date: new Date().toISOString().slice(0, 10),
-      };
+      } as any;
 
-      const pInsert = await supabase.from("producer_stock").insert([producerPayload] as any);
+      // insert producer row
+      const pInsert = await supabase.from("producer_stock").insert([producerPayload]);
       if ((pInsert as any)?.error) throw (pInsert as any).error;
 
-      const sInsert = await supabase.from("supermarket_stock").insert([supermarketPayload] as any);
+      // insert supermarket row
+      const sInsert = await supabase.from("supermarket_stock").insert([supermarketPayload]);
       if ((sInsert as any)?.error) {
+        // rollback producer row if supermarket insert failed
         const createdId = ((pInsert as any)?.data ?? [])[0]?.id;
-        if (createdId) {
-          await supabase.from("producer_stock").delete().eq("id", createdId);
-        }
+        if (createdId) await supabase.from("producer_stock").delete().eq("id", createdId);
         throw (sInsert as any).error;
       }
 
@@ -161,7 +140,8 @@ export default function ProducerDashboard() {
 
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["producer-stock"] });
-      queryClient.invalidateQueries({ queryKey: ["supermarket-stock"] });
+      queryClient.invalidateQueries({ queryKey: ["supermarket-incoming"] });
+      queryClient.invalidateQueries({ queryKey: ["supermarket-accepted"] });
       toast({
         title: "Stock uploaded & dispatched",
         description: `Product sent to ${form.target_supermarket}`,
@@ -181,11 +161,7 @@ export default function ProducerDashboard() {
     },
 
     onError: (err: any) => {
-      toast({
-        title: "Upload failed",
-        description: err?.message ?? "Unknown error",
-        variant: "destructive",
-      });
+      toast({ title: "Upload failed", description: err?.message ?? "Unknown error", variant: "destructive" });
     },
   });
 
@@ -330,7 +306,7 @@ export default function ProducerDashboard() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {producerStock.map((r) => (
+                  {producerStock.map((r: ProducerRow) => (
                     <TableRow key={r.id}>
                       <TableCell className="font-medium">{r.product_name}</TableCell>
                       <TableCell>{r.category}</TableCell>
@@ -348,4 +324,6 @@ export default function ProducerDashboard() {
       </Card>
     </div>
   );
-}
+};
+
+export default ProducerDashboard;

@@ -27,14 +27,14 @@ const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 type SupermarketRow = any;
 type LocalInsert = TablesInsert<"localmarket_stock">;
 
-export default function SupermarketDashboard() {
+export const SupermarketDashboard: React.FC = () => {
   const { toast } = useToast();
   const qc = useQueryClient();
 
   const [selectedSupermarket, setSelectedSupermarket] = useState<string>(SUPERMARKETS[0]);
   const [selectedProduct, setSelectedProduct] = useState<string>("");
 
-  // incoming (pending) that are addressed to this supermarket
+  // incoming (pending) for this supermarket
   const { data: incoming = [] } = useQuery({
     queryKey: ["supermarket-incoming", selectedSupermarket],
     queryFn: async () => {
@@ -64,22 +64,19 @@ export default function SupermarketDashboard() {
     },
   });
 
-  // top 10 trending products (prefer historical_sales if available)
+  // top 10 trending products (use historical_sales fallback)
   const { data: trending = [] } = useQuery({
     queryKey: ["trending", selectedSupermarket],
     queryFn: async () => {
-      // try historical_sales first
       const { data: hs } = await supabase
         .from("historical_sales")
         .select("product_name, quantity_sold")
         .eq("supermarket_branch", selectedSupermarket);
-      
+
       if (hs && hs.length > 0) {
         const grouped = Object.values(
           hs.reduce((acc: any, item: any) => {
-            if (!acc[item.product_name]) {
-              acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            }
+            if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
             acc[item.product_name].total += item.quantity_sold;
             return acc;
           }, {})
@@ -87,35 +84,29 @@ export default function SupermarketDashboard() {
         return grouped;
       }
 
-      // fallback: aggregate supermarket_stock quantities
       const { data: ss } = await supabase
         .from("supermarket_stock")
         .select("product_name, quantity")
         .eq("company_name", selectedSupermarket);
-      
+
       if (ss && ss.length > 0) {
         const grouped = Object.values(
           ss.reduce((acc: any, item: any) => {
-            if (!acc[item.product_name]) {
-              acc[item.product_name] = { product_name: item.product_name, total: 0 };
-            }
-            acc[item.product_name].total += item.quantity;
+            if (!acc[item.product_name]) acc[item.product_name] = { product_name: item.product_name, total: 0 };
+            acc[item.product_name].total += item.quantity ?? 0;
             return acc;
           }, {})
         ).sort((a: any, b: any) => b.total - a.total).slice(0, 10);
         return grouped;
       }
-      
+
       return [];
     },
   });
 
   const handleAccept = async (id: string, name: string) => {
     try {
-      const { error } = await supabase
-        .from("supermarket_stock")
-        .update({ accepted_at: new Date().toISOString() } as any) // cast to any to avoid strict types
-        .eq("id", id);
+      const { error } = await supabase.from("supermarket_stock").update({ accepted_at: new Date().toISOString() } as any).eq("id", id);
       if (error) throw error;
       toast({ title: "Accepted", description: `${name} added to inventory` });
       qc.invalidateQueries({ queryKey: ["supermarket-incoming", selectedSupermarket] });
@@ -137,13 +128,13 @@ export default function SupermarketDashboard() {
     }
   };
 
-  // ship to local market modal-ish flow: here we use a simple prompt (you can replace with dialog)
+  // Ship to local market (opens prompt or could be replaced by a modal)
   const handleShipToLocal = async (item: SupermarketRow) => {
     try {
-      const choice = prompt(`Enter destination local market:\n${LOCAL_MARKETS.join("\n")}`, LOCAL_MARKETS[0]);
+      const choice = prompt(`Send "${item.product_name}" to which local market?\n${LOCAL_MARKETS.join("\n")}`, LOCAL_MARKETS[0]);
       if (!choice) return;
       if (!LOCAL_MARKETS.includes(choice)) {
-        alert("Invalid local market name");
+        alert("Invalid local market");
         return;
       }
 
@@ -171,7 +162,7 @@ export default function SupermarketDashboard() {
 
       toast({ title: "Shipped", description: `${item.product_name} sent to ${choice}` });
       qc.invalidateQueries({ queryKey: ["supermarket-accepted", selectedSupermarket] });
-      qc.invalidateQueries({ queryKey: ["localmarket-accepted", choice] });
+      qc.invalidateQueries({ queryKey: ["localmarket-pending", choice] });
     } catch (err: any) {
       toast({ title: "Error", description: err?.message ?? "Failed to ship", variant: "destructive" });
     }
@@ -240,7 +231,7 @@ export default function SupermarketDashboard() {
                 <option value="">Select product</option>
                 {productList.map((p) => <option key={p} value={p}>{p}</option>)}
               </select>
-              {selectedProduct ? <PredictionChart productName={selectedProduct} /> : <div className="text-muted-foreground">Choose a product to see forecast</div>}
+              {selectedProduct ? <PredictionChart productName={selectedProduct} branch={selectedSupermarket} /> : <div className="text-muted-foreground">Choose a product to see forecast</div>}
             </CardContent>
           </Card>
 
@@ -277,15 +268,13 @@ export default function SupermarketDashboard() {
               {expiringSoon.length === 0 ? (
                 <p className="text-muted-foreground text-center">No expiring items</p>
               ) : expiringSoon.map((it: any) => (
-                <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2">
-                  <div className="flex justify-between">
-                    <div>
-                      <p className="font-medium">{it.product_name}</p>
-                      <p className="text-xs text-muted-foreground">{it.quantity} units</p>
-                    </div>
-                    <div>
-                      <Button size="sm" onClick={() => handleShipToLocal(it)}>Send</Button>
-                    </div>
+                <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2 flex justify-between">
+                  <div>
+                    <p className="font-medium text-destructive">{it.product_name}</p>
+                    <p className="text-xs text-muted-foreground">{it.quantity} units</p>
+                  </div>
+                  <div>
+                    <Button size="sm" onClick={() => handleShipToLocal(it)}>Send</Button>
                   </div>
                 </div>
               ))}
@@ -298,17 +287,20 @@ export default function SupermarketDashboard() {
               <CardDescription>By sales or available quantity</CardDescription>
             </CardHeader>
             <CardContent>
-              { (trending || []).length === 0 ? <div className="text-muted-foreground">No trending data</div> :
-                (trending || []).map((t: any, idx: number) => (
+              {(trending || []).length === 0 ? (
+                <div className="text-muted-foreground">No trending data</div>
+              ) : (trending || []).map((t: any, idx: number) => (
                 <div key={idx} className="flex justify-between py-1">
                   <div className="text-sm">{t.product_name}</div>
-                  <div className="text-sm font-medium">{t.total ?? t.sum ?? 0}</div>
+                  <div className="text-sm font-medium">{t.total ?? t.quantity_sold ?? 0}</div>
                 </div>
-              )) }
+              ))}
             </CardContent>
           </Card>
         </div>
       </div>
     </div>
   );
-}
+};
+
+export default SupermarketDashboard;
