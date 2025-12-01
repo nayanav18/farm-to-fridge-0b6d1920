@@ -1,4 +1,4 @@
-// ProducerDashboard.tsx
+// src/components/ProducerDashboard.tsx
 import React, { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
@@ -13,22 +13,9 @@ import {
 } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectTrigger,
-  SelectValue,
-  SelectContent,
-  SelectItem,
-} from "@/components/ui/select";
+import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
-import {
-  Table,
-  TableHeader,
-  TableRow,
-  TableHead,
-  TableBody,
-  TableCell,
-} from "@/components/ui/table";
+import { Table, TableHeader, TableRow, TableHead, TableBody, TableCell } from "@/components/ui/table";
 import { Loader2, Upload } from "lucide-react";
 
 const CATEGORIES = [
@@ -39,11 +26,19 @@ const CATEGORIES = [
   "Meat",
   "Grains",
   "Other",
-] as const;
+];
 
-const STORAGE_OPTIONS = ["Ambient", "Refrigerated", "Frozen"] as const;
+const STORAGE_OPTIONS = [
+  "Ambient",
+  "Refrigerated",
+  "Frozen",
+];
 
-const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"] as const;
+const SUPERMARKETS = [
+  "Supermarket A",
+  "Supermarket B",
+  "Supermarket C",
+];
 
 type ProducerRow = {
   id: string;
@@ -68,6 +63,7 @@ export default function ProducerDashboard() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
+  // Form state
   const [form, setForm] = useState({
     product_name: "",
     category: CATEGORIES[0],
@@ -83,6 +79,7 @@ export default function ProducerDashboard() {
   const updateField = (k: keyof typeof form, v: string) =>
     setForm((p) => ({ ...p, [k]: v }));
 
+  // derive shelf life days
   const shelfLifeDays = useMemo(() => {
     if (!form.manufacturing_date || !form.expiry_date) return 0;
     const m = new Date(form.manufacturing_date);
@@ -91,9 +88,8 @@ export default function ProducerDashboard() {
     return diff > 0 ? diff : 0;
   }, [form.manufacturing_date, form.expiry_date]);
 
-  const { data: producerStock = [], isRefetching: producerRefetching } = useQuery<
-    ProducerRow[]
-  >({
+  // fetch producer_stock for history view
+  const { data: producerStock = [], isRefetching: producerRefetching } = useQuery({
     queryKey: ["producer-stock"],
     queryFn: async () => {
       const res = await supabase
@@ -105,6 +101,7 @@ export default function ProducerDashboard() {
     },
   });
 
+  // mutation: insert into producer_stock and supermarket_stock
   const uploadMutation = useMutation({
     mutationFn: async (payload: typeof form) => {
       const qty = Number(payload.quantity) || 0;
@@ -147,13 +144,11 @@ export default function ProducerDashboard() {
         date: new Date().toISOString().slice(0, 10),
       };
 
-      // cast to any to avoid strict generated types blocking the dev flow
       const pInsert = await supabase.from("producer_stock").insert([producerPayload] as any);
       if ((pInsert as any)?.error) throw (pInsert as any).error;
 
       const sInsert = await supabase.from("supermarket_stock").insert([supermarketPayload] as any);
       if ((sInsert as any)?.error) {
-        // rollback producer if supermarket insert fails
         const createdId = ((pInsert as any)?.data ?? [])[0]?.id;
         if (createdId) {
           await supabase.from("producer_stock").delete().eq("id", createdId);
@@ -163,6 +158,7 @@ export default function ProducerDashboard() {
 
       return { producerRes: pInsert, supermarketRes: sInsert };
     },
+
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["producer-stock"] });
       queryClient.invalidateQueries({ queryKey: ["supermarket-stock"] });
@@ -170,6 +166,7 @@ export default function ProducerDashboard() {
         title: "Stock uploaded & dispatched",
         description: `Product sent to ${form.target_supermarket}`,
       });
+
       setForm({
         product_name: "",
         category: CATEGORIES[0],
@@ -182,6 +179,7 @@ export default function ProducerDashboard() {
         target_supermarket: SUPERMARKETS[0],
       });
     },
+
     onError: (err: any) => {
       toast({
         title: "Upload failed",
@@ -193,14 +191,7 @@ export default function ProducerDashboard() {
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault();
-    if (
-      !form.product_name ||
-      !form.company_name ||
-      !form.quantity ||
-      !form.price_per_unit ||
-      !form.manufacturing_date ||
-      !form.expiry_date
-    ) {
+    if (!form.product_name || !form.company_name || !form.quantity || !form.price_per_unit || !form.manufacturing_date || !form.expiry_date) {
       toast({ title: "Missing fields", description: "Please fill required fields", variant: "destructive" });
       return;
     }
@@ -210,8 +201,6 @@ export default function ProducerDashboard() {
     }
     uploadMutation.mutate(form);
   };
-
-  const btnIsLoading = uploadMutation.status === "pending";
 
   return (
     <div className="space-y-6">
@@ -301,8 +290,12 @@ export default function ProducerDashboard() {
               </div>
 
               <div className="mt-3">
-                <Button type="submit" className="w-full" disabled={btnIsLoading}>
-                  {btnIsLoading ? (<><Loader2 className="mr-2 h-4 w-4 animate-spin" />Uploading...</>) : ("Upload & Send")}
+                <Button type="submit" className="w-full" disabled={uploadMutation.status === "pending"}>
+                  {uploadMutation.status === "pending" ? (
+                    <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Uploading...</>
+                  ) : (
+                    "Upload & Send"
+                  )}
                 </Button>
               </div>
             </div>

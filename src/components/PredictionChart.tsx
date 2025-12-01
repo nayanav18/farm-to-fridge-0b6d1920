@@ -1,55 +1,83 @@
-// PredictionChart.tsx
+// src/components/PredictionChart.tsx
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
+import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from "recharts";
 
-type Props = { productName: string; branchFilter?: string | undefined };
+/**
+ * PredictionChart (frontend placeholder)
+ *
+ * - Fetches historical_sales rows for the given supermarket/localMarket and product.
+ * - Renders last N days actual demand and a simple forecast line.
+ *
+ * NOTE:
+ * Replace this with a backend endpoint that runs your Python RandomForest model and returns a forecast.
+ * I built this component so charts appear in the UI immediately and you can plug the actual model easily.
+ */
 
-export default function PredictionChart({ productName, branchFilter }: Props) {
-  const { data = [] } = useQuery({
-    queryKey: ["historical-sales", productName, branchFilter],
+type Props = {
+  supermarket?: string;
+  localMarket?: string;
+  productName: string;
+};
+
+const PredictionChart: React.FC<Props> = ({ supermarket, localMarket, productName }) => {
+  // determine branch filter (supermarket takes precedence)
+  const branch = supermarket ?? localMarket ?? "";
+
+  const { data: rows = [] } = useQuery({
+    queryKey: ["historical_sales_for", branch, productName],
     queryFn: async () => {
-      const q = supabase.from("historical_sales").select("*").eq("product_name", productName).order("date", { ascending: true });
-      const res = await q;
-      if ((res as any)?.error) throw (res as any).error;
-      return (res as any).data ?? [];
+      const { data, error } = await supabase
+        .from("historical_sales")
+        .select("date, quantity_sold, product_name, supermarket_branch")
+        .eq("product_name", productName)
+        .eq("supermarket_branch", branch);
+      if (error) throw error;
+      return (data ?? []) as any[];
     },
   });
 
-  // Aggregate by date
-  const aggregated = (data as any[]).reduce((acc:any, row:any) => {
-    const d = row.date;
-    acc[d] = (acc[d] || 0) + (row.quantity_sold || 0);
-    return acc;
-  }, {});
+  // aggregate per date and build sorted list
+  const grouped: Record<string, number> = {};
+  (rows || []).forEach((r: any) => {
+    const d = r.date?.slice(0, 10) ?? (new Date(r.date).toISOString().slice(0, 10));
+    grouped[d] = (grouped[d] || 0) + (r.quantity_sold ?? 0);
+  });
 
-  const dates = Object.keys(aggregated).sort();
-  const values = dates.map(d => aggregated[d]);
+  const dates = Object.keys(grouped).sort();
+  // show last 30 days if available
+  const shownDates = dates.slice(-30);
+  const data = shownDates.map((d) => ({ date: d, actual: grouped[d] || 0 }));
 
-  if (dates.length === 0) {
-    return <div className="p-4 text-sm text-muted-foreground">No historical sales data to show prediction for {productName}.</div>;
-  }
+  // simple forecast: rolling average of last 7 days
+  const avg = data.slice(-7).reduce((s, it) => s + (it.actual || 0), 0) / Math.max(1, data.slice(-7).length);
+  // forecast next 7 days (same avg)
+  const forecastPoints = Array.from({ length: 7 }).map((_, i) => {
+    const date = new Date(shownDates[shownDates.length - 1] ?? new Date().toISOString());
+    date.setDate(date.getDate() + i + 1);
+    return { date: date.toISOString().slice(0, 10), forecast: Math.round(avg) };
+  });
 
-  const max = Math.max(...values, 1);
-  const w = 600;
-  const h = 120;
-  const barW = Math.max(8, Math.floor(w / dates.length) - 4);
+  const combined = [
+    ...data.map((d) => ({ date: d.date, actual: d.actual })),
+    ...forecastPoints.map((f) => ({ date: f.date, actual: null, forecast: f.forecast })),
+  ];
 
   return (
-    <div className="overflow-auto">
-      <svg width={Math.min(w, dates.length * (barW + 4))} height={h} viewBox={`0 0 ${Math.min(w, dates.length * (barW + 4))} ${h}`}>
-        {values.map((v, i) => {
-          const x = i * (barW + 4) + 8;
-          const barH = (v / max) * (h - 30);
-          const y = h - barH - 20;
-          return (
-            <g key={i}>
-              <rect x={x} y={y} width={barW} height={barH} rx="3" />
-              <text x={x + barW / 2} y={h - 6} fontSize="10" textAnchor="middle" fill="#666">{dates[i]}</text>
-            </g>
-          );
-        })}
-      </svg>
+    <div style={{ width: "100%", height: 300 }}>
+      <ResponsiveContainer width="100%" height={300}>
+        <LineChart data={combined}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+          <YAxis />
+          <Tooltip />
+          <Line type="monotone" dataKey="actual" stroke="#06b6d4" name="Actual" dot={false} />
+          <Line type="monotone" dataKey="forecast" stroke="#fb923c" name="Forecast" strokeDasharray="4 4" dot />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
-}
+};
+
+export default PredictionChart;
