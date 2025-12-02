@@ -1,8 +1,9 @@
+// src/components/SupermarketDashboard.tsx
 import React, { useMemo, useState, useEffect } from "react";
+import Papa from "papaparse";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
-import Papa from "papaparse";
 
 import {
   Card,
@@ -11,110 +12,93 @@ import {
   CardDescription,
   CardContent,
 } from "@/components/ui/card";
-
 import { Button } from "@/components/ui/button";
-import { Send, Check, X } from "lucide-react";
+import { Check, Send, X } from "lucide-react";
 
 import PredictionChart from "@/components/PredictionChart";
 import UniversalPool from "@/components/UniversalPool";
 
 const SUPERMARKETS = ["Supermarket A", "Supermarket B", "Supermarket C"];
-const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 
-// MAP SUPERMARKET TO CSV FILE
-const getCSVForMarket = (market: string) => {
-  if (market.includes("A")) return "/data/supermarket_A.csv";
-  if (market.includes("B")) return "/data/supermarket_B.csv";
-  if (market.includes("C")) return "/data/supermarket_C.csv";
-  return "/data/supermarket_A.csv";
+const CSV_MAP: Record<string, string> = {
+  "Supermarket A": "/data/supermarket_A.csv",
+  "Supermarket B": "/data/supermarket_B.csv",
+  "Supermarket C": "/data/supermarket_C.csv",
 };
 
-export const SupermarketDashboard: React.FC = () => {
+export default function SupermarketDashboard() {
   const { toast } = useToast();
   const qc = useQueryClient();
 
-  const [selectedSupermarket, setSelectedSupermarket] = useState(SUPERMARKETS[0]);
+  const [selectedSupermarket, setSelectedSupermarket] = useState("Supermarket A");
   const [selectedProduct, setSelectedProduct] = useState("");
 
-  // ------------------------------------------------------------
-  // CSV LOADING FOR ANALYTICS
-  // ------------------------------------------------------------
+  // ------------------------
+  // LOAD CSV (TRENDING + DEMAND)
+  // ------------------------
   const [csvData, setCsvData] = useState<any[]>([]);
 
   useEffect(() => {
-    const file = getCSVForMarket(selectedSupermarket);
+    const file = CSV_MAP[selectedSupermarket];
+    if (!file) return;
 
-    const load = async () => {
-      const res = await fetch(file);
-      const text = await res.text();
-
-      Papa.parse(text, {
-        header: true,
-        skipEmptyLines: true,
-        complete: (results) => {
-          setCsvData(results.data);
-        },
-      });
-    };
-
-    load();
+    Papa.parse(file, {
+      download: true,
+      header: true,
+      skipEmptyLines: true,
+      complete: (res) => setCsvData(res.data),
+    });
   }, [selectedSupermarket]);
 
-  // ------------------------------------------------------------
-  // TRENDING PRODUCTS (TOP 10)
-  // ------------------------------------------------------------
-  const trending = useMemo(() => {
-    if (!csvData.length) return [];
-
-    const grouped = Object.values(
-      csvData.reduce((acc: any, row: any) => {
-        const name = row.Product_Name;
-        const sold = Number(row.Quantity_Sold || 0);
-
-        if (!acc[name]) acc[name] = { product_name: name, total: 0 };
-        acc[name].total += sold;
-
-        return acc;
-      }, {})
-    ).sort((a: any, b: any) => b.total - a.total);
-
-    return grouped.slice(0, 10);
-  }, [csvData]);
-
-  // ------------------------------------------------------------
-  // CURRENTLY IN DEMAND (LAST 14 DAYS)
-  // ------------------------------------------------------------
-  const recentDemand = useMemo(() => {
-    if (!csvData.length) return [];
+  // -------------------------
+  // CURRENTLY IN DEMAND (7 DAYS)
+  // -------------------------
+  const demand7Days = useMemo(() => {
+    if (csvData.length === 0) return [];
 
     const cutoff = new Date();
-    cutoff.setDate(cutoff.getDate() - 14);
+    cutoff.setDate(cutoff.getDate() - 7);
 
-    const filtered = csvData.filter((row) => {
-      const date = new Date(row.Date);
-      return date >= cutoff;
+    const grouped: Record<string, number> = {};
+
+    csvData.forEach((row) => {
+      const d = new Date(row.Date);
+      if (d < cutoff) return;
+
+      const qty = Number(row.Quantity_Sold || 0);
+      if (!grouped[row.Product_Name]) grouped[row.Product_Name] = 0;
+      grouped[row.Product_Name] += qty;
     });
 
-    const grouped = Object.values(
-      filtered.reduce((acc: any, row: any) => {
-        const name = row.Product_Name;
-        const sold = Number(row.Quantity_Sold || 0);
-
-        if (!acc[name]) acc[name] = { product_name: name, total: 0 };
-        acc[name].total += sold;
-
-        return acc;
-      }, {})
-    ).sort((a: any, b: any) => b.total - a.total);
-
-    return grouped.slice(0, 10);
+    return Object.entries(grouped)
+      .map(([product_name, total]) => ({ product_name, total }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
   }, [csvData]);
 
-  // ------------------------------------------------------------
-  // SUPABASE LOGIC FOR INVENTORY / INCOMING
-  // ------------------------------------------------------------
+  // -------------------------
+  // TRENDING PRODUCTS (CSV)
+  // -------------------------
+  const trending = useMemo(() => {
+    if (csvData.length === 0) return [];
 
-  // Incoming = transfer_date exists AND date is null
+    const grouped: Record<string, number> = {};
+
+    csvData.forEach((row) => {
+      const qty = Number(row.Quantity_Sold || 0);
+      if (!grouped[row.Product_Name]) grouped[row.Product_Name] = 0;
+      grouped[row.Product_Name] += qty;
+    });
+
+    return Object.entries(grouped)
+      .map(([product_name, total]) => ({ product_name, total }))
+      .sort((a, b) => b.total - a.total)
+      .slice(0, 10);
+  }, [csvData]);
+
+  // -------------------------
+  // SUPABASE: INCOMING
+  // -------------------------
   const { data: incomingData } = useQuery({
     queryKey: ["incoming", selectedSupermarket],
     queryFn: async () => {
@@ -122,115 +106,103 @@ export const SupermarketDashboard: React.FC = () => {
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
-        .is("date", null)
-        .not("transfer_date", "is", null);
+        .not("transfer_date", "is", null)
+        .is("date", null); // ❗ MUST BE NULL, else accepted
 
       if (error) throw error;
       return data ?? [];
     },
   });
 
-  const [incoming, setIncoming] = useState<any[]>([]);
-  useEffect(() => setIncoming(incomingData || []), [incomingData]);
+  const incoming = incomingData || [];
 
-  // Accepted = date IS NOT NULL
-  const { data: inventoryData } = useQuery({
+  // -------------------------
+  // SUPABASE: ACCEPTED INVENTORY
+  // -------------------------
+  const { data: acceptedData } = useQuery({
     queryKey: ["inventory", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
-        .not("date", "is", null)
-        .order("date", { ascending: false });
+        .not("date", "is", null);
 
       if (error) throw error;
       return data ?? [];
     },
   });
 
-  const [inventory, setInventory] = useState<any[]>([]);
-  useEffect(() => setInventory(inventoryData || []), [inventoryData]);
+  const acceptedStock = acceptedData || [];
 
-  // ------------------------------------------------------------
-  // ACCEPT ITEM
-  // ------------------------------------------------------------
+  // -------------------------
+  // ACCEPT BUTTON
+  // -------------------------
   const handleAccept = async (id: string) => {
     await supabase
       .from("supermarket_stock")
-      .update({ date: new Date().toISOString() })
+      .update({
+        date: new Date().toISOString(), // accepted timestamp
+      })
       .eq("id", id);
 
-    setIncoming((prev) => prev.filter((i) => i.id !== id));
+    qc.invalidateQueries();
+    toast({ title: "Accepted", description: "Item added to inventory." });
+  };
+
+  // -------------------------
+  // REJECT BUTTON
+  // -------------------------
+  const handleReject = async (id: string) => {
+    await supabase.from("supermarket_stock").delete().eq("id", id);
     qc.invalidateQueries();
   };
 
-  // ------------------------------------------------------------
-  // REJECT ITEM
-  // ------------------------------------------------------------
-  const handleReject = async (id: string) => {
-    await supabase.from("supermarket_stock").delete().eq("id", id);
-    setIncoming((prev) => prev.filter((i) => i.id !== id));
-  };
-
-  // ------------------------------------------------------------
-  // SHIP TO LOCAL MARKET
-  // ------------------------------------------------------------
-  const handleShipToLocal = async (item: any) => {
-    const choice = prompt("Send to:", LOCAL_MARKETS[0]);
-    if (!choice) return;
-
-    const payload = {
-      product_id: item.product_id,
-      product_name: item.product_name,
-      category: item.category,
-      company_name: choice,
-      is_perishable: item.is_perishable,
-      shelf_life_days: item.shelf_life_days,
-      storage_temperature: item.storage_temperature,
-      lot_id: item.lot_id,
-      quantity: item.quantity,
-      manufacturing_date: item.manufacturing_date,
-      expiry_date: item.expiry_date,
-      price_per_unit: item.price_per_unit,
-      source_supermarket: item.company_name,
-      transfer_date: new Date().toISOString(),
-    };
-
-    await supabase.from("localmarket_stock").insert([payload]);
-    await supabase.from("supermarket_stock").delete().eq("id", item.id);
-    setInventory((prev) => prev.filter((i) => i.id !== item.id));
-  };
-
-  // ------------------------------------------------------------
+  // -------------------------
   // EXPIRING SOON
-  // ------------------------------------------------------------
+  // -------------------------
   const expiringSoon = useMemo(() => {
     const now = Date.now();
+    return acceptedStock.filter((it: any) => {
+      const diff =
+        (new Date(it.expiry_date).getTime() - now) /
+        (1000 * 60 * 60 * 24);
+      return diff >= 0 && diff <= 5;
+    });
+  }, [acceptedStock]);
 
-    return inventory
-      .filter((it: any) => {
-        const diff =
-          (new Date(it.expiry_date).getTime() - now) /
-          (1000 * 60 * 60 * 24);
-        return diff >= 0 && diff <= 7;
-      })
-      .slice(0, 10);
-  }, [inventory]);
+  // -------------------------
+  // SHIP TO LOCAL MARKET
+  // -------------------------
+  const handleShipToLocal = async (item: any) => {
+    const choice = prompt("Send to which Local Market?", "Local Market A");
+    if (!choice) return;
 
-  // ------------------------------------------------------------
+    await supabase.from("localmarket_stock").insert([
+      {
+        ...item,
+        company_name: choice,
+        transfer_date: new Date().toISOString(),
+        accepted_at: null,
+      },
+    ]);
+
+    await supabase.from("supermarket_stock").delete().eq("id", item.id);
+    qc.invalidateQueries();
+  };
+
+  // -------------------------
   // RENDER UI
-  // ------------------------------------------------------------
-
+  // -------------------------
   return (
     <div className="space-y-6 p-4">
       {/* SELECT SUPERMARKET */}
-      <div className="flex gap-4 items-center">
+      <div className="flex items-center gap-4">
         <h3>Select Supermarket:</h3>
         <select
           value={selectedSupermarket}
           onChange={(e) => setSelectedSupermarket(e.target.value)}
-          className="p-2 rounded border"
+          className="p-2 border rounded"
         >
           {SUPERMARKETS.map((s) => (
             <option key={s}>{s}</option>
@@ -239,23 +211,21 @@ export const SupermarketDashboard: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-
-        {/* LEFT SIDE */}
+        {/* LEFT SECTION */}
         <div className="lg:col-span-2 space-y-6">
-
           {/* CURRENTLY IN DEMAND */}
           <Card>
             <CardHeader>
-              <CardTitle>Currently in Demand (last 14 days)</CardTitle>
+              <CardTitle>Currently in Demand (last 7 days)</CardTitle>
             </CardHeader>
             <CardContent>
-              {recentDemand.length === 0 ? (
+              {demand7Days.length === 0 ? (
                 <p>No data</p>
               ) : (
-                <ol className="list-decimal ml-5">
-                  {recentDemand.map((i: any, idx) => (
-                    <li key={idx}>
-                      {i.product_name} — {i.total}
+                <ol className="list-decimal pl-5">
+                  {demand7Days.map((d, i) => (
+                    <li key={i}>
+                      {d.product_name} — {d.total}
                     </li>
                   ))}
                 </ol>
@@ -279,8 +249,12 @@ export const SupermarketDashboard: React.FC = () => {
                       <p className="text-xs">{item.quantity} units</p>
                     </div>
                     <div className="flex gap-2">
-                      <Button onClick={() => handleAccept(item.id)}><Check /></Button>
-                      <Button variant="destructive" onClick={() => handleReject(item.id)}><X /></Button>
+                      <Button onClick={() => handleAccept(item.id)}>
+                        <Check /> Accept
+                      </Button>
+                      <Button variant="destructive" onClick={() => handleReject(item.id)}>
+                        <X /> Reject
+                      </Button>
                     </div>
                   </div>
                 ))
@@ -295,7 +269,7 @@ export const SupermarketDashboard: React.FC = () => {
             </CardHeader>
             <CardContent>
               <select
-                className="w-full border p-2 rounded mb-4"
+                className="w-full p-2 border rounded mb-4"
                 value={selectedProduct}
                 onChange={(e) => setSelectedProduct(e.target.value)}
               >
@@ -314,17 +288,16 @@ export const SupermarketDashboard: React.FC = () => {
 
         {/* RIGHT SIDE */}
         <div className="space-y-6">
-
           {/* ACCEPTED INVENTORY */}
           <Card>
             <CardHeader>
               <CardTitle>Accepted Inventory</CardTitle>
             </CardHeader>
             <CardContent>
-              {inventory.length === 0 ? (
+              {acceptedStock.length === 0 ? (
                 <p>No inventory</p>
               ) : (
-                inventory.map((item) => (
+                acceptedStock.map((item) => (
                   <div key={item.id} className="flex justify-between p-3 bg-muted rounded mb-2">
                     <div>
                       <p>{item.product_name}</p>
@@ -340,18 +313,18 @@ export const SupermarketDashboard: React.FC = () => {
           </Card>
 
           {/* EXPIRING SOON */}
-          <Card>
+          <Card className="border-red-400">
             <CardHeader>
-              <CardTitle>Expiring Soon</CardTitle>
+              <CardTitle className="text-red-600">Expiring Soon</CardTitle>
             </CardHeader>
             <CardContent>
               {expiringSoon.length === 0 ? (
                 <p>No expiring items</p>
               ) : (
-                expiringSoon.map((it) => (
+                expiringSoon.map((it: any) => (
                   <div key={it.id} className="p-3 bg-red-100 rounded mb-2 flex justify-between">
                     <div>
-                      <p className="font-semibold text-red-600">{it.product_name}</p>
+                      <p className="font-semibold">{it.product_name}</p>
                       <p className="text-xs">{it.quantity} units</p>
                     </div>
                     <Button size="sm" onClick={() => handleShipToLocal(it)}>
@@ -363,7 +336,7 @@ export const SupermarketDashboard: React.FC = () => {
             </CardContent>
           </Card>
 
-          {/* TRENDING PRODUCTS */}
+          {/* TRENDING */}
           <Card>
             <CardHeader>
               <CardTitle>Trending Products</CardTitle>
@@ -372,20 +345,17 @@ export const SupermarketDashboard: React.FC = () => {
               {trending.length === 0 ? (
                 <p>No data</p>
               ) : (
-                trending.map((item: any, idx) => (
-                  <div key={idx} className="flex justify-between py-1">
-                    <span>{item.product_name}</span>
-                    <span className="font-bold">{item.total}</span>
+                trending.map((t, i) => (
+                  <div key={i} className="flex justify-between py-1">
+                    <span>{t.product_name}</span>
+                    <span className="font-semibold">{t.total}</span>
                   </div>
                 ))
               )}
             </CardContent>
           </Card>
-
         </div>
       </div>
     </div>
   );
-};
-
-export default SupermarketDashboard;
+}

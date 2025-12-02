@@ -1,51 +1,89 @@
-import React from "react";
-import { Line } from "react-chartjs-2";
+// src/components/PredictionChart.tsx
+import React, { useMemo } from "react";
 import {
-  Chart as ChartJS,
-  LineElement,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  Tooltip,
-  Legend
-} from "chart.js";
+  LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
+} from "recharts";
 
-ChartJS.register(
-  LineElement,
-  CategoryScale,
-  LinearScale,
-  PointElement,
-  Tooltip,
-  Legend
-);
+// Utility to format date
+const formatDate = (d: Date) => d.toISOString().split("T")[0];
+const addDays = (d: Date, n: number) => {
+  const newD = new Date(d);
+  newD.setDate(newD.getDate() + n);
+  return newD;
+};
 
-export default function PredictionChart({ csvData, productName }: any) {
-  if (!productName) return <p>Select a product to see graph</p>;
+export default function PredictionChart({
+  csvData,
+  productName,
+}: {
+  csvData: any[];
+  productName: string;
+}) {
+  // -----------------------------
+  // Parse & Normalize CSV Data
+  // -----------------------------
+  const cleaned = useMemo(() => {
+    return csvData
+      .filter((row) => {
+        const name =
+          row.Product_Name ||
+          row.Item_Name ||
+          "";
+        return name === productName;
+      })
+      .map((row) => ({
+        date: row.Date || row.Timestamp,
+        sold: Number(row.Quantity_Sold || row.Units_Sold || 0),
+      }))
+      .filter((row) => row.date);
+  }, [csvData, productName]);
 
-  const filtered = csvData.filter(
-    (row: any) => row.Product_Name === productName
-  );
+  if (cleaned.length === 0 || !productName)
+    return <div>Select product</div>;
 
-  const labels = filtered.map((r: any) => r.Date);
-  const values = filtered.map((r: any) => Number(r.Quantity_Sold));
+  // -----------------------------
+  // Actual historical points
+  // -----------------------------
+  const historical = cleaned.map((r) => ({
+    date: formatDate(new Date(r.date)),
+    value: r.sold,
+  }));
 
-  const data = {
-    labels,
-    datasets: [
-      {
-        label: `${productName} Sales Trend`,
-        data: values,
-        borderWidth: 2,
-        borderColor: "#3b82f6",
-        tension: 0.3,
-        pointRadius: 3,
-      },
-    ],
-  };
+  // -----------------------------
+  // Forecast next 7 days
+  // -----------------------------
+  const lastDate = new Date(historical[historical.length - 1].date);
+  const last7 = historical.slice(-7).map((h) => h.value);
+  const movingAvg =
+    last7.reduce((a, b) => a + b, 0) / Math.max(last7.length, 1);
+
+  const forecast = [];
+  for (let i = 1; i <= 7; i++) {
+    forecast.push({
+      date: formatDate(addDays(lastDate, i)),
+      value: Math.round(movingAvg),
+    });
+  }
+
+  // Full combined dataset
+  const chartData = [...historical, ...forecast];
 
   return (
-    <div>
-      <Line data={data} />
+    <div style={{ width: "100%", height: 300 }}>
+      <ResponsiveContainer>
+        <LineChart data={chartData}>
+          <XAxis dataKey="date" hide={false} />
+          <YAxis />
+          <Tooltip />
+          <Line
+            type="monotone"
+            dataKey="value"
+            stroke="#0077FF"
+            strokeWidth={2}
+            dot={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   );
 }
