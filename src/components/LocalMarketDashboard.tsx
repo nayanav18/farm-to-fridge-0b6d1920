@@ -16,7 +16,6 @@ import {
 import { Button } from "@/components/ui/button";
 import { CheckCircle } from "lucide-react";
 import PredictionChart from "@/components/PredictionChart";
-import UniversalPool from "@/components/UniversalPool";
 
 const LOCAL_MARKETS = ["Local Market A", "Local Market B"];
 const LOCAL_CSV_MAP: Record<string, string> = {
@@ -44,13 +43,11 @@ export default function LocalMarketDashboard() {
   const [csvData, setCsvData] = useState<any[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<string>("");
 
-  // Load CSV on market switch
+  // Load CSV when market changes
   useEffect(() => {
     const file = LOCAL_CSV_MAP[selectedLocalMarket];
     if (!file) return;
-
     let cancelled = false;
-
     Papa.parse(file, {
       download: true,
       header: true,
@@ -58,50 +55,40 @@ export default function LocalMarketDashboard() {
         if (!cancelled) setCsvData(res.data || []);
       },
     });
-
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [selectedLocalMarket]);
 
-  // 🔥 Trending (original logic stays)
+  // Trending (original logic)
   const trending = useMemo(() => {
     if (!csvData || csvData.length === 0) return [];
-
     const grouped: Record<string, number> = {};
-
     csvData.forEach((row) => {
       const qty =
         Number(row.Quantity_Sold) ||
         Number(row.quantity_sold) ||
         Number(row.sold_qty) ||
         0;
-
       const name =
         row.Product_Name ||
         row.product_name ||
         row.item_name ||
         "Unknown";
-
       grouped[name] = (grouped[name] ?? 0) + qty;
     });
-
     return Object.entries(grouped)
       .map(([product_name, total]) => ({ product_name, total }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
   }, [csvData]);
 
-  // 🔥 Currently in Demand (last 7 days)
-  // SAME as trending but SHUFFLED
+  // Demand = same items as trending but shuffled
   const demand7Days = useMemo(() => {
     if (!trending || trending.length === 0) return [];
-
     const shuffled = [...trending].sort(() => Math.random() - 0.5);
     return shuffled.slice(0, 10);
   }, [trending]);
 
-  // Pending transfers
+  // pending transfers
   const { data: pendingData } = useQuery<LocalMarketStockRow[]>({
     queryKey: ["localmarket-pending", selectedLocalMarket],
     queryFn: async () => {
@@ -111,7 +98,6 @@ export default function LocalMarketDashboard() {
         .eq("company_name", selectedLocalMarket)
         .is("accepted_at", null)
         .order("transfer_date", { ascending: false });
-
       if (error) throw error;
       return (data as LocalMarketStockRow[]) ?? [];
     },
@@ -120,7 +106,7 @@ export default function LocalMarketDashboard() {
   const [pendingTransfers, setPendingTransfers] = useState<LocalMarketStockRow[]>([]);
   useEffect(() => setPendingTransfers(pendingData ?? []), [pendingData]);
 
-  // Accepted stock
+  // accepted stock
   const { data: acceptedData } = useQuery<LocalMarketStockRow[]>({
     queryKey: ["localmarket-accepted", selectedLocalMarket],
     queryFn: async () => {
@@ -130,7 +116,6 @@ export default function LocalMarketDashboard() {
         .eq("company_name", selectedLocalMarket)
         .not("accepted_at", "is", null)
         .order("accepted_at", { ascending: false });
-
       if (error) throw error;
       return (data as LocalMarketStockRow[]) ?? [];
     },
@@ -145,38 +130,47 @@ export default function LocalMarketDashboard() {
         .from("localmarket_stock")
         .update({ accepted_at: new Date().toISOString() })
         .eq("id", id);
-
       if (error) throw error;
-
-      toast({
-        title: "Accepted",
-        description: `${productName} added to inventory.`,
-      });
-
-      qc.invalidateQueries({
-        queryKey: ["localmarket-pending", selectedLocalMarket],
-      });
-      qc.invalidateQueries({
-        queryKey: ["localmarket-accepted", selectedLocalMarket],
-      });
+      toast({ title: "Accepted", description: `${productName} added to inventory.` });
+      qc.invalidateQueries({ queryKey: ["localmarket-pending", selectedLocalMarket] });
+      qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
     } catch (err: any) {
-      toast({
-        title: "Error",
-        description: err?.message ?? "Failed",
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
     }
   };
 
-  // Expiring soon
+  // Move expiring item to another market
+  const [moveTarget, setMoveTarget] = useState<Record<string, string>>({});
+
+  const moveItem = async (item: LocalMarketStockRow) => {
+    const target = moveTarget[item.id];
+    if (!target) {
+      toast({ title: "Select target", description: "Choose a market to move to.", variant: "destructive" });
+      return;
+    }
+    try {
+      const { error } = await supabase
+        .from("localmarket_stock")
+        .update({
+          company_name: target,
+          transfer_date: new Date().toISOString(),
+          accepted_at: null,
+        })
+        .eq("id", item.id);
+
+      if (error) throw error;
+      toast({ title: "Moved", description: `${item.product_name} moved to ${target}.` });
+      qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
+    } catch (err: any) {
+      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
+    }
+  };
+
   const expiringSoon = useMemo(() => {
     const now = Date.now();
     return acceptedStock.filter((i) => {
       try {
-        const diff =
-          (new Date(i.expiry_date ?? "").getTime() - now) /
-          (1000 * 60 * 60 * 24);
-
+        const diff = (new Date(i.expiry_date ?? "").getTime() - now) / (1000 * 60 * 60 * 24);
         return diff >= 0 && diff <= 3;
       } catch {
         return false;
@@ -185,13 +179,12 @@ export default function LocalMarketDashboard() {
   }, [acceptedStock]);
 
   const productList = Array.from(
-    new Set(
-      csvData.map((r) => r.Product_Name || r.product_name).filter(Boolean)
-    )
-  );
+    new Set(csvData.map((r) => r.Product_Name || r.product_name))
+  ).filter(Boolean);
 
   return (
     <div className="space-y-6 p-4">
+      {/* SELECT MARKET */}
       <div className="flex items-center gap-4">
         <h3 className="font-medium">Select Local Market:</h3>
         <select
@@ -199,15 +192,14 @@ export default function LocalMarketDashboard() {
           onChange={(e) => setSelectedLocalMarket(e.target.value)}
           className="p-2 border rounded"
         >
-          {LOCAL_MARKETS.map((lm) => (
-            <option key={lm}>{lm}</option>
-          ))}
+          {LOCAL_MARKETS.map((lm) => <option key={lm}>{lm}</option>)}
         </select>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <div className="lg:col-span-2 space-y-6">
-          {/* 🔥 Currently in Demand */}
+          
+          {/* DEMAND SECTION */}
           <Card>
             <CardHeader>
               <CardTitle>Currently in Demand (last 7 days)</CardTitle>
@@ -219,16 +211,14 @@ export default function LocalMarketDashboard() {
               ) : (
                 <ol className="list-decimal pl-4">
                   {demand7Days.map((d, i) => (
-                    <li key={i}>
-                      {d.product_name} — {d.total}
-                    </li>
+                    <li key={i}>{d.product_name} — {d.total}</li>
                   ))}
                 </ol>
               )}
             </CardContent>
           </Card>
 
-          {/* Pending transfers */}
+          {/* PENDING TRANSFERS */}
           <Card>
             <CardHeader>
               <CardTitle>Pending Transfers</CardTitle>
@@ -238,18 +228,12 @@ export default function LocalMarketDashboard() {
                 <p>No pending transfers</p>
               ) : (
                 pendingTransfers.map((p) => (
-                  <div
-                    key={p.id}
-                    className="flex justify-between p-3 bg-muted/20 rounded mb-2"
-                  >
+                  <div key={p.id} className="flex justify-between p-3 bg-muted/20 rounded mb-2">
                     <div>
                       <p>{p.product_name}</p>
                       <p className="text-xs">{p.quantity} units</p>
                     </div>
-                    <Button
-                      onClick={() => handleAcceptTransfer(p.id, p.product_name)}
-                      className="bg-green-600 text-white"
-                    >
+                    <Button onClick={() => handleAcceptTransfer(p.id, p.product_name)} className="bg-green-600 text-white">
                       <CheckCircle /> Accept
                     </Button>
                   </div>
@@ -258,7 +242,7 @@ export default function LocalMarketDashboard() {
             </CardContent>
           </Card>
 
-          {/* Predictions */}
+          {/* PREDICTION */}
           <Card>
             <CardHeader>
               <CardTitle>Demand Prediction</CardTitle>
@@ -271,24 +255,18 @@ export default function LocalMarketDashboard() {
                 onChange={(e) => setSelectedProduct(e.target.value)}
               >
                 <option value="">Select product</option>
-                {productList.map((p, i) => (
-                  <option key={i}>{p}</option>
-                ))}
+                {productList.map((p, i) => <option key={i}>{p}</option>)}
               </select>
 
-              <PredictionChart
-                csvData={csvData}
-                productName={selectedProduct}
-                daysAhead={7}
-              />
+              <PredictionChart csvData={csvData} productName={selectedProduct} daysAhead={7} />
             </CardContent>
           </Card>
-
-          <UniversalPool currentPlace={selectedLocalMarket} />
         </div>
 
+        {/* RIGHT SIDE */}
         <div className="space-y-6">
-          {/* Expiring soon */}
+
+          {/* EXPIRING SOON */}
           <Card className="border-destructive">
             <CardHeader>
               <CardTitle className="text-destructive">Expiring Soon</CardTitle>
@@ -298,19 +276,33 @@ export default function LocalMarketDashboard() {
                 <p>No expiring items</p>
               ) : (
                 expiringSoon.map((it) => (
-                  <div
-                    key={it.id}
-                    className="p-3 bg-destructive/10 rounded mb-2"
-                  >
-                    <p>{it.product_name}</p>
+                  <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2">
+                    <p className="font-semibold">{it.product_name}</p>
                     <p className="text-xs">{it.quantity} units</p>
+
+                    <div className="mt-2 flex items-center gap-2">
+                      <select
+                        className="p-1 border rounded"
+                        value={moveTarget[it.id] ?? ""}
+                        onChange={(e) => setMoveTarget(prev => ({ ...prev, [it.id]: e.target.value }))}
+                      >
+                        <option value="">Choose market</option>
+                        {LOCAL_MARKETS.filter(lm => lm !== selectedLocalMarket).map((lm) => (
+                          <option key={lm} value={lm}>{lm}</option>
+                        ))}
+                      </select>
+
+                      <Button onClick={() => moveItem(it)} className="bg-blue-600 text-white">
+                        Move
+                      </Button>
+                    </div>
                   </div>
                 ))
               )}
             </CardContent>
           </Card>
 
-          {/* Trending */}
+          {/* TRENDING */}
           <Card>
             <CardHeader>
               <CardTitle>Trending (Top 10)</CardTitle>

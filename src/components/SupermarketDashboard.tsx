@@ -16,7 +16,6 @@ import { Button } from "@/components/ui/button";
 import { Send, Check, X } from "lucide-react";
 
 import PredictionChart from "@/components/PredictionChart";
-import UniversalPool from "@/components/UniversalPool";
 
 /** Row interfaces matching your provided DB schema */
 type SupermarketStockRow = {
@@ -309,7 +308,6 @@ export const SupermarketDashboard: React.FC = () => {
             </CardContent>
           </Card>
 
-          <UniversalPool currentPlace={selectedSupermarket} />
         </div>
 
         <div className="space-y-6">
