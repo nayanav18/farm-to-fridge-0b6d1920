@@ -24,14 +24,24 @@ const LOCAL_CSV_MAP: Record<string, string> = {
 };
 
 type LocalMarketStockRow = {
-  id: string;
-  product_id: number;
-  product_name: string;
-  company_name: string;
-  quantity: number;
-  accepted_at: string | null;
-  transfer_date: string | null;
+  id?: string;
+  product_id?: number;
+  product_name?: string;
+  company_name?: string;
+  quantity?: number;
+  accepted_at?: string | null;
+  transfer_date?: string | null;
   expiry_date?: string | null;
+  [k: string]: any;
+};
+
+type SaleRow = {
+  id?: string;
+  local_market?: string;
+  product_id?: number;
+  product_name?: string;
+  quantity_sold?: number;
+  sold_at?: string;
   [k: string]: any;
 };
 
@@ -43,11 +53,13 @@ export default function LocalMarketDashboard() {
   const [csvData, setCsvData] = useState<any[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<string>("");
 
-  // Load CSV when market changes
+  // Load CSV
   useEffect(() => {
     const file = LOCAL_CSV_MAP[selectedLocalMarket];
     if (!file) return;
+
     let cancelled = false;
+
     Papa.parse(file, {
       download: true,
       header: true,
@@ -55,136 +67,198 @@ export default function LocalMarketDashboard() {
         if (!cancelled) setCsvData(res.data || []);
       },
     });
-    return () => { cancelled = true; };
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedLocalMarket]);
 
-  // Trending (original logic)
+  // Trending
   const trending = useMemo(() => {
     if (!csvData || csvData.length === 0) return [];
+
     const grouped: Record<string, number> = {};
+
     csvData.forEach((row) => {
       const qty =
         Number(row.Quantity_Sold) ||
         Number(row.quantity_sold) ||
         Number(row.sold_qty) ||
         0;
+
       const name =
         row.Product_Name ||
         row.product_name ||
         row.item_name ||
         "Unknown";
+
       grouped[name] = (grouped[name] ?? 0) + qty;
     });
+
     return Object.entries(grouped)
       .map(([product_name, total]) => ({ product_name, total }))
       .sort((a, b) => b.total - a.total)
       .slice(0, 10);
   }, [csvData]);
 
-  // Demand = same items as trending but shuffled
+  // Demand = shuffle of trending
   const demand7Days = useMemo(() => {
     if (!trending || trending.length === 0) return [];
-    const shuffled = [...trending].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, 10);
+    return [...trending].sort(() => Math.random() - 0.5);
   }, [trending]);
 
-  // pending transfers
-  const { data: pendingData } = useQuery<LocalMarketStockRow[]>({
+  // Queries
+  const pendingQuery = useQuery({
     queryKey: ["localmarket-pending", selectedLocalMarket],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("localmarket_stock")
+      const res = await supabase
+        .from("localmarket_stock" as any)
         .select("*")
         .eq("company_name", selectedLocalMarket)
         .is("accepted_at", null)
         .order("transfer_date", { ascending: false });
-      if (error) throw error;
-      return (data as LocalMarketStockRow[]) ?? [];
+
+      return (res.data ?? []) as LocalMarketStockRow[];
     },
   });
 
-  const [pendingTransfers, setPendingTransfers] = useState<LocalMarketStockRow[]>([]);
-  useEffect(() => setPendingTransfers(pendingData ?? []), [pendingData]);
-
-  // accepted stock
-  const { data: acceptedData } = useQuery<LocalMarketStockRow[]>({
+  const acceptedQuery = useQuery({
     queryKey: ["localmarket-accepted", selectedLocalMarket],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from("localmarket_stock")
+      const res = await supabase
+        .from("localmarket_stock" as any)
         .select("*")
         .eq("company_name", selectedLocalMarket)
         .not("accepted_at", "is", null)
         .order("accepted_at", { ascending: false });
-      if (error) throw error;
-      return (data as LocalMarketStockRow[]) ?? [];
+
+      return (res.data ?? []) as LocalMarketStockRow[];
     },
   });
 
-  const [acceptedStock, setAcceptedStock] = useState<LocalMarketStockRow[]>([]);
-  useEffect(() => setAcceptedStock(acceptedData ?? []), [acceptedData]);
+  const salesQuery = useQuery({
+    queryKey: ["localmarket-sales", selectedLocalMarket],
+    queryFn: async () => {
+      const res = await supabase
+        .from("localmarket_sales" as any)
+        .select("*")
+        .eq("local_market", selectedLocalMarket)
+        .order("sold_at", { ascending: false });
 
-  const handleAcceptTransfer = async (id: string, productName: string) => {
-    try {
-      const { error } = await supabase
-        .from("localmarket_stock")
-        .update({ accepted_at: new Date().toISOString() })
-        .eq("id", id);
-      if (error) throw error;
-      toast({ title: "Accepted", description: `${productName} added to inventory.` });
-      qc.invalidateQueries({ queryKey: ["localmarket-pending", selectedLocalMarket] });
-      qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
-    }
-  };
+      return (res.data ?? []) as SaleRow[];
+    },
+  });
 
-  // Move expiring item to another market
-  const [moveTarget, setMoveTarget] = useState<Record<string, string>>({});
+  const pendingTransfers = pendingQuery.data ?? [];
+  const acceptedStock = acceptedQuery.data ?? [];
+  const salesLog = salesQuery.data ?? [];
 
-  const moveItem = async (item: LocalMarketStockRow) => {
-    const target = moveTarget[item.id];
-    if (!target) {
-      toast({ title: "Select target", description: "Choose a market to move to.", variant: "destructive" });
+  // Accept transfer
+  const handleAcceptTransfer = async (id?: string, productName?: string) => {
+    if (!id) return;
+
+    const { error } = await supabase
+      .from("localmarket_stock" as any)
+      .update({ accepted_at: new Date().toISOString() } as any)
+      .eq("id", id);
+
+    if (error) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
       return;
     }
-    try {
-      const { error } = await supabase
-        .from("localmarket_stock")
-        .update({
-          company_name: target,
-          transfer_date: new Date().toISOString(),
-          accepted_at: null,
-        })
-        .eq("id", item.id);
 
-      if (error) throw error;
-      toast({ title: "Moved", description: `${item.product_name} moved to ${target}.` });
-      qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
-    } catch (err: any) {
-      toast({ title: "Error", description: err?.message ?? "Failed", variant: "destructive" });
-    }
+    toast({ title: "Accepted", description: `${productName} added to inventory.` });
+
+    qc.invalidateQueries({ queryKey: ["localmarket-pending", selectedLocalMarket] });
+    qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
   };
 
+  // Sell item
+  const handleSell = async (item: LocalMarketStockRow) => {
+    const available = Number(item.quantity ?? 0);
+    const input = window.prompt(
+      `Sell how many units of ${item.product_name}? (Available: ${available})`,
+      "1"
+    );
+
+    if (input === null) return;
+
+    const qty = Math.floor(Number(input));
+    if (qty <= 0 || qty > available) {
+      toast({
+        title: "Invalid quantity",
+        description: "Check the entered amount",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    // Step 1: Update stock
+    await supabase
+      .from("localmarket_stock" as any)
+      .update({ quantity: available - qty } as any)
+      .eq("id", item.id);
+
+    // Step 2: Insert sale
+    await supabase.from("localmarket_sales" as any).insert({
+      local_market: selectedLocalMarket,
+      product_id: item.product_id,
+      product_name: item.product_name,
+      quantity_sold: qty,
+      sold_at: new Date().toISOString(),
+    });
+
+    toast({
+      title: "Sold",
+      description: `${qty} units of ${item.product_name} sold.`,
+    });
+
+    qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
+    qc.invalidateQueries({ queryKey: ["localmarket-sales", selectedLocalMarket] });
+  };
+
+  // Expiring soon
   const expiringSoon = useMemo(() => {
     const now = Date.now();
     return acceptedStock.filter((i) => {
-      try {
-        const diff = (new Date(i.expiry_date ?? "").getTime() - now) / (1000 * 60 * 60 * 24);
-        return diff >= 0 && diff <= 3;
-      } catch {
-        return false;
-      }
+      const diff = (new Date(i.expiry_date ?? "").getTime() - now) / (1000 * 60 * 60 * 24);
+      return diff >= 0 && diff <= 3;
     });
   }, [acceptedStock]);
 
-  const productList = Array.from(
-    new Set(csvData.map((r) => r.Product_Name || r.product_name))
-  ).filter(Boolean);
+  // Move expiring item
+  const [moveTarget, setMoveTarget] = useState<Record<string, string>>({});
+  const moveItem = async (item: LocalMarketStockRow) => {
+    const target = moveTarget[item.id ?? ""];
+    if (!target) return;
+
+    await supabase
+      .from("localmarket_stock" as any)
+      .update({
+        company_name: target,
+        transfer_date: new Date().toISOString(),
+        accepted_at: null,
+      } as any)
+      .eq("id", item.id);
+
+    toast({ title: "Moved", description: `${item.product_name} moved.` });
+
+    qc.invalidateQueries({ queryKey: ["localmarket-accepted", selectedLocalMarket] });
+    qc.invalidateQueries({ queryKey: ["localmarket-pending", target] });
+  };
+
+  const productList: string[] = Array.from(
+    new Set(csvData.map((r: any) => r.Product_Name || r.product_name))
+  ).filter((x): x is string => Boolean(x));
+
+  // ===================== RENDER =====================
 
   return (
     <div className="space-y-6 p-4">
-      {/* SELECT MARKET */}
       <div className="flex items-center gap-4">
         <h3 className="font-medium">Select Local Market:</h3>
         <select
@@ -192,33 +266,36 @@ export default function LocalMarketDashboard() {
           onChange={(e) => setSelectedLocalMarket(e.target.value)}
           className="p-2 border rounded"
         >
-          {LOCAL_MARKETS.map((lm) => <option key={lm}>{lm}</option>)}
+          {LOCAL_MARKETS.map((lm) => (
+            <option key={lm}>{lm}</option>
+          ))}
         </select>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* LEFT PANEL */}
         <div className="lg:col-span-2 space-y-6">
-          
-          {/* DEMAND SECTION */}
+          {/* Demand */}
           <Card>
             <CardHeader>
               <CardTitle>Currently in Demand (last 7 days)</CardTitle>
-              <CardDescription>Recent high-demand items</CardDescription>
             </CardHeader>
             <CardContent>
               {demand7Days.length === 0 ? (
-                <p className="text-muted-foreground">No demand data</p>
+                <p>No data</p>
               ) : (
-                <ol className="list-decimal pl-4">
+                <ol className="pl-4 list-decimal">
                   {demand7Days.map((d, i) => (
-                    <li key={i}>{d.product_name} — {d.total}</li>
+                    <li key={i}>
+                      {d.product_name} — {d.total}
+                    </li>
                   ))}
                 </ol>
               )}
             </CardContent>
           </Card>
 
-          {/* PENDING TRANSFERS */}
+          {/* Pending Transfers */}
           <Card>
             <CardHeader>
               <CardTitle>Pending Transfers</CardTitle>
@@ -228,12 +305,18 @@ export default function LocalMarketDashboard() {
                 <p>No pending transfers</p>
               ) : (
                 pendingTransfers.map((p) => (
-                  <div key={p.id} className="flex justify-between p-3 bg-muted/20 rounded mb-2">
+                  <div
+                    key={p.id}
+                    className="flex justify-between bg-muted/20 p-3 rounded mb-2"
+                  >
                     <div>
                       <p>{p.product_name}</p>
                       <p className="text-xs">{p.quantity} units</p>
                     </div>
-                    <Button onClick={() => handleAcceptTransfer(p.id, p.product_name)} className="bg-green-600 text-white">
+                    <Button
+                      className="bg-green-600 text-white"
+                      onClick={() => handleAcceptTransfer(p.id, p.product_name)}
+                    >
                       <CheckCircle /> Accept
                     </Button>
                   </div>
@@ -242,7 +325,39 @@ export default function LocalMarketDashboard() {
             </CardContent>
           </Card>
 
-          {/* PREDICTION */}
+          {/* Sell Items Section (INVENTORY) */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Sell Items</CardTitle>
+              <CardDescription>Available inventory</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {acceptedStock.length === 0 ? (
+                <p>No inventory available</p>
+              ) : (
+                acceptedStock.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex justify-between bg-muted/20 p-3 rounded mb-2"
+                  >
+                    <div>
+                      <p>{item.product_name}</p>
+                      <p className="text-xs">{item.quantity} units available</p>
+                    </div>
+
+                    <Button
+                      className="bg-orange-600 text-white"
+                      onClick={() => handleSell(item)}
+                    >
+                      Sell
+                    </Button>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Demand Prediction */}
           <Card>
             <CardHeader>
               <CardTitle>Demand Prediction</CardTitle>
@@ -250,23 +365,28 @@ export default function LocalMarketDashboard() {
             </CardHeader>
             <CardContent>
               <select
-                className="w-full p-2 border rounded mb-4"
+                className="w-full border p-2 rounded mb-3"
                 value={selectedProduct}
                 onChange={(e) => setSelectedProduct(e.target.value)}
               >
                 <option value="">Select product</option>
-                {productList.map((p, i) => <option key={i}>{p}</option>)}
+                {productList.map((p, i) => (
+                  <option key={i}>{p}</option>
+                ))}
               </select>
 
-              <PredictionChart csvData={csvData} productName={selectedProduct} daysAhead={7} />
+              <PredictionChart
+                csvData={csvData}
+                productName={selectedProduct}
+                daysAhead={7}
+              />
             </CardContent>
           </Card>
         </div>
 
-        {/* RIGHT SIDE */}
+        {/* RIGHT PANEL */}
         <div className="space-y-6">
-
-          {/* EXPIRING SOON */}
+          {/* Expiring Soon */}
           <Card className="border-destructive">
             <CardHeader>
               <CardTitle className="text-destructive">Expiring Soon</CardTitle>
@@ -276,23 +396,28 @@ export default function LocalMarketDashboard() {
                 <p>No expiring items</p>
               ) : (
                 expiringSoon.map((it) => (
-                  <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2">
-                    <p className="font-semibold">{it.product_name}</p>
+                  <div key={it.id} className="p-3 bg-destructive/10 rounded mb-3">
+                    <p>{it.product_name}</p>
                     <p className="text-xs">{it.quantity} units</p>
 
-                    <div className="mt-2 flex items-center gap-2">
+                    <div className="flex gap-2 mt-2">
                       <select
-                        className="p-1 border rounded"
-                        value={moveTarget[it.id] ?? ""}
-                        onChange={(e) => setMoveTarget(prev => ({ ...prev, [it.id]: e.target.value }))}
+                        className="border p-1 rounded"
+                        value={moveTarget[it.id ?? ""] ?? ""}
+                        onChange={(e) =>
+                          setMoveTarget((prev) => ({
+                            ...prev,
+                            [it.id ?? ""]: e.target.value,
+                          }))
+                        }
                       >
-                        <option value="">Choose market</option>
-                        {LOCAL_MARKETS.filter(lm => lm !== selectedLocalMarket).map((lm) => (
-                          <option key={lm} value={lm}>{lm}</option>
+                        <option value="">Select Market</option>
+                        {LOCAL_MARKETS.filter((m) => m !== selectedLocalMarket).map((m) => (
+                          <option key={m}>{m}</option>
                         ))}
                       </select>
 
-                      <Button onClick={() => moveItem(it)} className="bg-blue-600 text-white">
+                      <Button className="bg-blue-600 text-white" onClick={() => moveItem(it)}>
                         Move
                       </Button>
                     </div>
@@ -302,19 +427,44 @@ export default function LocalMarketDashboard() {
             </CardContent>
           </Card>
 
-          {/* TRENDING */}
+          {/* Selling Log */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Selling Log</CardTitle>
+              <CardDescription>Recent sales</CardDescription>
+            </CardHeader>
+            <CardContent>
+              {salesLog.length === 0 ? (
+                <p>No sales</p>
+              ) : (
+                salesLog.map((s) => (
+                  <div key={s.id} className="flex justify-between py-1">
+                    <div>
+                      <p>{s.product_name}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {s.sold_at ? new Date(s.sold_at).toLocaleString() : ""}
+                      </p>
+                    </div>
+                    <strong>{s.quantity_sold}</strong>
+                  </div>
+                ))
+              )}
+            </CardContent>
+          </Card>
+
+          {/* Trending */}
           <Card>
             <CardHeader>
               <CardTitle>Trending (Top 10)</CardTitle>
             </CardHeader>
             <CardContent>
               {trending.length === 0 ? (
-                <p>No trending data</p>
+                <p>No data</p>
               ) : (
                 trending.map((t, i) => (
                   <div key={i} className="flex justify-between py-1">
                     <span>{t.product_name}</span>
-                    <span className="font-semibold">{t.total}</span>
+                    <strong>{t.total}</strong>
                   </div>
                 ))
               )}
