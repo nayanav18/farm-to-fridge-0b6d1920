@@ -29,8 +29,9 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 
-import { Send, Check, X, Loader2 } from "lucide-react";
+import { Send, Loader2, Store, Package } from "lucide-react";
 import PredictionChart from "@/components/PredictionChart";
 
 // Constants
@@ -117,34 +118,16 @@ const SupermarketDashboard: React.FC = () => {
   }, [csvData, selectedSupermarket]);
 
   // ---------------------------
-  // Supabase: Incoming & Inventory
+  // Supabase: Inventory
   // ---------------------------
-  const { data: incomingData } = useQuery({
-    queryKey: ["supermarket-incoming", selectedSupermarket],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from("supermarket_stock")
-        .select("*")
-        .eq("company_name", selectedSupermarket)
-        .is("date", null) // Checks for null date (pending items)
-        .not("transfer_date", "is", null)
-        .order("transfer_date", { ascending: false });
-      if (error) throw error;
-      return (data ?? []) as any[];
-    },
-  });
-
-  const [incoming, setIncoming] = useState<any[]>([]);
-  useEffect(() => setIncoming(incomingData ?? []), [incomingData]);
-
   const { data: inventoryData } = useQuery({
-    queryKey: ["supermarket-accepted", selectedSupermarket],
+    queryKey: ["supermarket-inventory", selectedSupermarket],
     queryFn: async () => {
       const { data, error } = await supabase
         .from("supermarket_stock")
         .select("*")
         .eq("company_name", selectedSupermarket)
-        .not("date", "is", null) // Checks for existing date (accepted items)
+        .not("date", "is", null) 
         .order("date", { ascending: false });
       if (error) throw error;
       return (data ?? []) as any[];
@@ -154,118 +137,91 @@ const SupermarketDashboard: React.FC = () => {
   const [inventory, setInventory] = useState<any[]>([]);
   useEffect(() => setInventory(inventoryData ?? []), [inventoryData]);
 
-  // ---------------------------
-  // Actions: Accept / Reject (Incoming)
-  // ---------------------------
-  const handleAccept = async (id: string) => {
-    try {
-      const acceptTimestamp = new Date().toISOString();
-      // Set the 'date' field to now, moving it from Incoming -> Inventory
-      const { error } = await supabase
-        .from("supermarket_stock")
-        .update({ date: acceptTimestamp }) 
-        .eq("id", id);
+  // WORKAROUND: Use 'lot_id' suffix to detect display status since we have no DB access
+  const displayInventory = useMemo(() => 
+    inventory.filter((i) => i.lot_id && i.lot_id.endsWith('_DSP')), 
+  [inventory]);
 
-      if (error) throw error;
-
-      // Optimistic UI update
-      const acceptedItem = incoming.find((i) => i.id === id) ?? null;
-      setIncoming((prev) => prev.filter((p) => p.id !== id));
-      if (acceptedItem) {
-        setInventory((prev) => [{ ...acceptedItem, date: acceptTimestamp }, ...prev]);
-      } else {
-        qc.invalidateQueries();
-      }
-      toast({ title: "Accepted", description: "Item added to inventory." });
-    } catch (err: any) {
-      toast({ title: "Error", variant: "destructive", description: err?.message });
-    }
-  };
-
-  const handleReject = async (id: string) => {
-    try {
-      const { error } = await supabase.from("supermarket_stock").delete().eq("id", id);
-      if (error) throw error;
-      setIncoming((prev) => prev.filter((i) => i.id !== id));
-      toast({ title: "Rejected", description: "Item removed." });
-    } catch (err: any) {
-      toast({ title: "Error", variant: "destructive", description: err?.message });
-    }
-  };
+  const storageInventory = useMemo(() => 
+    inventory.filter((i) => !i.lot_id || !i.lot_id.endsWith('_DSP')), 
+  [inventory]);
 
   // ---------------------------
-  // Shipping Logic (Transfer)
+  // Shipping / Transfer Logic
   // ---------------------------
   
-  // 1. Open Modal
   const openShipModal = (item: any) => {
     setItemToShip(item);
     setSelectedDestination(""); 
     setIsShipDialogOpen(true);
   };
 
-  // 2. Destinations List
   const availableDestinations = useMemo(() => {
     return [
       ...LOCAL_MARKETS,
-      ...SUPERMARKETS.filter((s) => s !== selectedSupermarket),
+      ...SUPERMARKETS, 
     ];
-  }, [selectedSupermarket]);
+  }, []);
 
-  // 3. Confirm Transfer
   const handleTransferConfirm = async () => {
     if (!itemToShip || !selectedDestination) return;
     setIsShipping(true);
 
     try {
       const isTargetSupermarket = SUPERMARKETS.includes(selectedDestination);
+      const isSelfTransfer = selectedDestination === selectedSupermarket;
+      
       const targetTable = isTargetSupermarket ? "supermarket_stock" : "localmarket_stock";
 
-      // Prepare Payload
+      // WORKAROUND: Modify lot_id instead of using 'status' column
+      let newLotId = itemToShip.lot_id || "BATCH001";
+      if (isSelfTransfer) {
+        // Only append if not already there
+        if (!newLotId.endsWith('_DSP')) newLotId = newLotId + "_DSP";
+      } else {
+        // Clean up the tag if shipping out
+        newLotId = newLotId.replace('_DSP', '');
+      }
+
+      // Prepare Payload (NO 'status' field here)
       const finalPayload: any = {
         product_id: itemToShip.product_id,
         product_name: itemToShip.product_name,
         category: itemToShip.category,
-        company_name: selectedDestination, // New Owner
+        company_name: selectedDestination,
         is_perishable: itemToShip.is_perishable,
         shelf_life_days: itemToShip.shelf_life_days,
         storage_temperature: itemToShip.storage_temperature,
-        lot_id: itemToShip.lot_id,
+        lot_id: newLotId, // <--- MODIFIED LOT ID
         quantity: itemToShip.quantity,
         manufacturing_date: itemToShip.manufacturing_date,
         expiry_date: itemToShip.expiry_date,
         price_per_unit: itemToShip.price_per_unit,
         transfer_date: new Date().toISOString(),
-        // IMPORTANT: We set 'date' to now() to satisfy the NOT NULL constraint.
-        // This means the transfer is immediate (no pending state on receiver side).
         date: new Date().toISOString(),
       };
 
       if (isTargetSupermarket) {
-        // Supermarket -> Supermarket
-        // Preserve original producer if available
         finalPayload.source_producer = itemToShip.source_producer; 
       } else {
-        // Supermarket -> Local Market
-        // Mark current supermarket as the source
         finalPayload.source_supermarket = selectedSupermarket;
       }
 
-      // A. Insert into destination table
+      // 1. Insert into destination
       const { error: insErr } = await supabase.from(targetTable).insert([finalPayload]);
       if (insErr) throw insErr;
 
-      // B. Delete from source table (current supermarket)
+      // 2. Delete from source (current row)
       const { error: delErr } = await supabase.from("supermarket_stock").delete().eq("id", itemToShip.id);
       if (delErr) throw delErr;
 
-      // C. Update UI
+      // 3. UI Updates
       setInventory((prev) => prev.filter((p) => p.id !== itemToShip.id));
-      setIncoming((prev) => prev.filter((p) => p.id !== itemToShip.id)); 
       
+      const actionType = isSelfTransfer ? "Moved to Display" : "Transferred";
       toast({ 
-        title: "Transfer Successful", 
-        description: `${itemToShip.product_name} transferred to ${selectedDestination}` 
+        title: "Success", 
+        description: `${itemToShip.product_name} ${actionType} -> ${selectedDestination}` 
       });
       
       setIsShipDialogOpen(false);
@@ -277,7 +233,7 @@ const SupermarketDashboard: React.FC = () => {
       toast({ 
         title: "Transfer Failed", 
         variant: "destructive", 
-        description: err.message || "Could not complete transfer." 
+        description: err.message 
       });
     } finally {
       setIsShipping(false);
@@ -304,31 +260,30 @@ const SupermarketDashboard: React.FC = () => {
   return (
     <div className="space-y-6 p-4">
       
-      {/* --- SHIPPING DIALOG --- */}
+      {/* --- SHIPPING/MOVING DIALOG --- */}
       <Dialog open={isShipDialogOpen} onOpenChange={setIsShipDialogOpen}>
         <DialogContent className="sm:max-w-[425px]">
           <DialogHeader>
-            <DialogTitle>Ship Product</DialogTitle>
+            <DialogTitle>Move / Ship Product</DialogTitle>
             <DialogDescription>
-              Transferring <strong>{itemToShip?.product_name}</strong> ({itemToShip?.quantity} units).
-              Select a destination below.
+              Select an external market to ship to, or select <strong>{selectedSupermarket}</strong> to move this item to the <strong>Display Floor</strong>.
             </DialogDescription>
           </DialogHeader>
           
           <div className="grid gap-4 py-4">
             <div className="grid gap-2">
-              <Label htmlFor="destination">Destination</Label>
+              <Label htmlFor="destination">Destination / Location</Label>
               <Select 
                 value={selectedDestination} 
                 onValueChange={setSelectedDestination}
               >
                 <SelectTrigger id="destination">
-                  <SelectValue placeholder="Select Market or Supermarket" />
+                  <SelectValue placeholder="Select Destination" />
                 </SelectTrigger>
                 <SelectContent>
                   {availableDestinations.map((dest) => (
                     <SelectItem key={dest} value={dest}>
-                      {dest}
+                      {dest === selectedSupermarket ? `${dest} (Move to Display)` : dest}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -342,7 +297,7 @@ const SupermarketDashboard: React.FC = () => {
             </Button>
             <Button onClick={handleTransferConfirm} disabled={!selectedDestination || isShipping}>
               {isShipping && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-              Confirm Transfer
+              {selectedDestination === selectedSupermarket ? "Move to Display" : "Confirm Ship"}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -364,48 +319,86 @@ const SupermarketDashboard: React.FC = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        {/* LEFT COLUMN */}
         <div className="col-span-2 space-y-6">
-          <Card>
+          
+          {/* 1. STORE DISPLAY SHOWCASE */}
+          
+
+[Image of supermarket shelf display]
+
+          <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
             <CardHeader>
-              <CardTitle>Currently in Demand</CardTitle>
-              <CardDescription>Last 7 days based on sales data</CardDescription>
+              <div className="flex items-center gap-2">
+                <Store className="w-5 h-5 text-blue-600" />
+                <CardTitle className="text-blue-900">Accepted Stock</CardTitle>
+              </div>
+              <CardDescription>Items currently on the floor for sale ({selectedSupermarket})</CardDescription>
             </CardHeader>
             <CardContent>
-              {recentDemand.length === 0 ? <p>No data</p> : (
-                <ol className="list-decimal ml-5">
-                  {recentDemand.map((i: any, idx: number) => (
-                    <li key={idx}>{i.product_name} — {i.total}</li>
-                  ))}
-                </ol>
+              {displayInventory.length === 0 ? (
+                <div className="text-center py-6 text-muted-foreground bg-white/50 rounded border border-dashed">
+                  No items on display. Move items from storage here.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                   {displayInventory.map((item: any) => (
+                      <div key={item.id} className="flex flex-col p-3 bg-white rounded shadow-sm border border-blue-100">
+                        <div className="flex justify-between items-start mb-2">
+                          <span className="font-bold text-blue-800">{item.product_name}</span>
+                          <Badge variant="outline" className="bg-blue-100 text-blue-700 border-0">On Shelf</Badge>
+                        </div>
+                        <div className="text-sm text-gray-600 space-y-1">
+                          <p>Quantity: <span className="font-medium">{item.quantity}</span></p>
+                          <p>Price: Rs.{item.price_per_unit}</p>
+                        </div>
+                        <Button 
+                          size="sm" 
+                          variant="ghost" 
+                          className="mt-3 text-xs w-full border border-dashed hover:bg-blue-50"
+                          onClick={() => openShipModal(item)}
+                        >
+                          Relocate
+                        </Button>
+                      </div>
+                   ))}
+                </div>
               )}
             </CardContent>
           </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle>Incoming Stock</CardTitle>
-              <CardDescription>Pending verification from Transfers</CardDescription>
-            </CardHeader>
-            <CardContent>
-              {incoming.length === 0 ? <p>No incoming stock</p> : incoming.map((it: any) => (
-                <div key={it.id} className="flex justify-between p-3 bg-muted/40 rounded mb-2">
-                  <div>
-                    <p className="font-medium">{it.product_name}</p>
-                    <p className="text-xs text-muted-foreground">{it.quantity} units • {it.category}</p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button size="sm" onClick={() => handleAccept(it.id)}>
-                      <Check className="w-4 h-4 mr-1" /> Accept
-                    </Button>
-                    <Button size="sm" variant="destructive" onClick={() => handleReject(it.id)}>
-                      <X className="w-4 h-4 mr-1" /> Reject
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
+          {/* 2. DEMAND & TRENDS */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <Card>
+              <CardHeader>
+                <CardTitle>Currently in Demand</CardTitle>
+                <CardDescription>Last 7 days sales</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {recentDemand.length === 0 ? <p>No data</p> : (
+                  <ol className="list-decimal ml-5 space-y-1">
+                    {recentDemand.map((i: any, idx: number) => (
+                      <li key={idx} className="text-sm">{i.product_name} — <strong>{i.total}</strong></li>
+                    ))}
+                  </ol>
+                )}
+              </CardContent>
+            </Card>
 
+            <Card>
+              <CardHeader><CardTitle>Trending Products</CardTitle></CardHeader>
+              <CardContent>
+                {trending.map((t: any, i: number) => (
+                  <div className="flex justify-between py-1 text-sm" key={i}>
+                    <span>{t.product_name}</span>
+                    <span className="font-semibold">{t.total}</span>
+                  </div>
+                ))}
+              </CardContent>
+            </Card>
+          </div>
+
+          {/* 3. PREDICTION */}
           <Card>
             <CardHeader><CardTitle>Demand Prediction</CardTitle></CardHeader>
             <CardContent>
@@ -422,53 +415,58 @@ const SupermarketDashboard: React.FC = () => {
           </Card>
         </div>
 
+        {/* RIGHT COLUMN */}
         <div className="space-y-6">
+          
+          {/* STORAGE INVENTORY (Was Accepted Inventory) */}
+          
+
+[Image of warehouse storage]
+
           <Card>
             <CardHeader>
-              <CardTitle>Accepted Inventory</CardTitle>
-              <CardDescription>Manage stock for {selectedSupermarket}</CardDescription>
+              <div className="flex items-center gap-2">
+                <Package className="w-5 h-5" />
+                <CardTitle>Incoming Stock</CardTitle>
+              </div>
+              <CardDescription>Inventory available for shipping or display</CardDescription>
             </CardHeader>
             <CardContent>
-              {inventory.length === 0 ? <p>No inventory</p> : inventory.map((item: any) => (
-                <div key={item.id} className="flex justify-between items-center p-3 bg-muted/30 rounded mb-2">
-                  <div>
-                    <p className="font-medium">{item.product_name}</p>
-                    <p className="text-xs">{item.quantity} units</p>
+              {storageInventory.length === 0 ? <p className="text-muted-foreground text-sm">No items in storage.</p> : storageInventory.map((item: any) => (
+                <div key={item.id} className="flex flex-col p-3 bg-muted/30 rounded mb-2 border">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <p className="font-medium text-sm">{item.product_name}</p>
+                      <p className="text-xs text-muted-foreground">{item.quantity} units • {item.category}</p>
+                    </div>
                   </div>
-                  <Button size="sm" variant="outline" onClick={() => openShipModal(item)}>
-                    <Send className="w-4 h-4 mr-1" /> Ship
+                  <Button 
+                    size="sm" 
+                    variant="default" 
+                    className="mt-2 h-8" 
+                    onClick={() => openShipModal(item)}
+                  >
+                    <Send className="w-3 h-3 mr-2" /> Move / Ship
                   </Button>
                 </div>
               ))}
             </CardContent>
           </Card>
 
-          <Card className="border-destructive">
+          <Card className="border-destructive/50">
             <CardHeader>
               <CardTitle className="text-destructive">Expiring Soon</CardTitle>
             </CardHeader>
             <CardContent>
-              {expiringSoon.length === 0 ? <p>No expiring items</p> : expiringSoon.map((it) => (
-                <div key={it.id} className="p-3 bg-destructive/10 rounded mb-2 flex justify-between items-center">
+              {expiringSoon.length === 0 ? <p className="text-sm">No expiring items</p> : expiringSoon.map((it) => (
+                <div key={it.id} className="p-3 bg-destructive/5 rounded mb-2 flex justify-between items-center border border-destructive/20">
                   <div>
-                    <p className="font-medium text-destructive">{it.product_name}</p>
+                    <p className="font-medium text-destructive text-sm">{it.product_name}</p>
                     <p className="text-xs">{it.quantity} units</p>
                   </div>
-                  <Button size="sm" variant="secondary" onClick={() => openShipModal(it)}>
-                    Send
+                  <Button size="sm" variant="secondary" className="h-7 text-xs" onClick={() => openShipModal(it)}>
+                    Action
                   </Button>
-                </div>
-              ))}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader><CardTitle>Trending Products</CardTitle></CardHeader>
-            <CardContent>
-              {trending.map((t: any, i: number) => (
-                <div className="flex justify-between py-1" key={i}>
-                  <span>{t.product_name}</span>
-                  <span className="font-semibold">{t.total}</span>
                 </div>
               ))}
             </CardContent>
