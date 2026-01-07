@@ -325,8 +325,6 @@ const SupermarketDashboard: React.FC = () => {
           {/* 1. STORE DISPLAY SHOWCASE */}
           
 
-[Image of supermarket shelf display]
-
           <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 border-blue-200">
             <CardHeader>
               <div className="flex items-center gap-2">
@@ -421,7 +419,6 @@ const SupermarketDashboard: React.FC = () => {
           {/* STORAGE INVENTORY (Was Accepted Inventory) */}
           
 
-[Image of warehouse storage]
 
           <Card>
             <CardHeader>

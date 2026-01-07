@@ -17,7 +17,7 @@ const HistoricalSalesChart = () => {
       setLoading(true);
       try {
         const csvFiles = [
-          "/data/supermarket_A_20000_single.csv",
+          "/data/supermarket_A_20000.csv",
           "/data/supermarket_B_20000.csv",
           "/data/supermarket_C_20000.csv",
         ];

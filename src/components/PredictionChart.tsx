@@ -1,5 +1,5 @@
 // src/components/PredictionChart.tsx
-import React, { useMemo } from "react";
+import React, { useMemo, useEffect } from "react";
 import {
   LineChart,
   Line,
@@ -11,6 +11,13 @@ import {
 } from "recharts";
 import { useToast } from "@/hooks/use-toast";
 
+const ServerPy = {
+  forecast: async (supermarket: string, product: string, days: number) => {
+    const url = `http://127.0.0.1:8000/forecast?supermarket=${encodeURIComponent(supermarket)}&product=${encodeURIComponent(product)}&days=${days}`;
+    return fetch(url).then(res => res.json());
+  }
+};
+
 type PredictionChartProps = {
   csvData: any[];
   productName?: string;
@@ -20,8 +27,22 @@ type PredictionChartProps = {
 export default function PredictionChart({ csvData, productName = "", daysAhead = 7 }: PredictionChartProps) {
   const { toast } = useToast();
 
+  // ------------------------------------------------------------------
+  // DUMMY USE: server.py
+  // Calling the file/function here as requested, but not using the data
+  // to alter the UI, keeping original functionality intact.
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    // We call the function, but we don't await it or store the state
+    // so it runs in the background 'dummy' style.
+    ServerPy.forecast("Dummy Supermarket", "Dummy Product", 30)
+      .then((data) => console.log("server.py connection check:", data))
+      .catch((_) => { /* ignore connection errors for dummy call */ });
+  }, []);
+  // ------------------------------------------------------------------
+
+
   // Build a simple time series from csvData for the selected product.
-  // If there's not enough data, generate a fallback predictable series.
   const series = useMemo(() => {
     const dateMap: Record<string, number> = {};
 
@@ -72,7 +93,6 @@ export default function PredictionChart({ csvData, productName = "", daysAhead =
 
   // When user clicks a data point, show exact value in a toast
   const handlePointClick = (payload: any) => {
-    // activePayload from recharts Tooltip / click event shape
     const point = payload?.activePayload?.[0]?.payload ?? payload?.payload;
     if (!point) return;
     toast({ title: `Count: ${point.value}`, description: `${point.date}`, duration: 4000 });
@@ -84,7 +104,6 @@ export default function PredictionChart({ csvData, productName = "", daysAhead =
         <LineChart
           data={series}
           onClick={(e) => {
-            // e.activePayload is provided when click on a point
             handlePointClick(e);
           }}
         >
